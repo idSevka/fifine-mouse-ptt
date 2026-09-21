@@ -9,7 +9,7 @@ NAME="fifine-ptt"
 
 echo "==> Установка в ${BIN}"
 mkdir -p "$BIN"
-for f in fifine-ptt fifine-ptt-selftest mic-status; do
+for f in fifine-ptt fifine-ptt-selftest mic-status fifine-setup.py; do
   install -Dm755 "${HERE}/${f}" "${BIN}/${f}"
   echo "    ${BIN}/${f}"
 done

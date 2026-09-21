@@ -45,28 +45,122 @@ press и на release, а логику положить в скрипт с фа�
 
 ## Установка
 
+### Общий случай (любой дистрибутив)
+
+Проект не зависит от оконного менеджера — Hyprland не нужен. Требуется только
+звуковой сервер (PipeWire или PulseAudio) и доступ к `/dev/input`.
+
 ```bash
 git clone https://github.com/idSevka/fifine-mouse-ptt.git
 cd fifine-mouse-ptt
-./install.sh
+
+# 1. Посмотреть, чего не хватает (зависимости, права на /dev/input)
+python3 fifine-setup.py
 ```
 
-`install.sh` копирует скрипты в `~/.local/bin`, создаёт автозапуск в
-`~/.config/autostart` и проверяет, что демон находит устройства.
-
-Если у вас другое железо — сначала посмотрите, что найдено:
+`fifine-setup.py` — **начните с него на новой машине.** Он проверит окружение,
+сам найдёт микрофон, попросит нажать боковую кнопку мыши и поймает её код,
+затем запишет конфиг в `~/.config/fifine-ptt/env`. После этого вручную править
+ничего не нужно — демон подхватит конфиг автоматически.
 
 ```bash
-fifine-ptt --status
+# 2. Установить
+./install.sh
+
+# 3. Проверить
+fifine-ptt --status         # устройства найдены?
+fifine-ptt-selftest         # логика: 6/6
+watch -n0.3 mic-status      # и нажать кнопку
 ```
 
-```
-alsa_input.usb-fifine_...analog-stereo: unmuted
-мышь:      ['/dev/input/event3']
-сенсорная: ['/dev/input/event7']  (обработка: ВКЛ)
+### Установка зависимостей по дистрибутивам
+
+Единственная реальная зависимость — утилита `pactl` (из `pipewire` или
+`pulseaudio-utils`) и `python3` (обычно уже есть).
+
+| Дистрибутив | Команда |
+|---|---|
+| Arch / Omarchy | `sudo pacman -S libpulse pipewire` |
+| Ubuntu / Debian | `sudo apt install pulseaudio-utils pipewire-bin` |
+| Fedora | `sudo dnf install pulseaudio-utils pipewire-utils` |
+| openSUSE | `sudo zypper install pulseaudio-utils` |
+
+Проверить, что звуковой сервер отвечает:
+
+```bash
+pactl info          # должно вывести Server Name: PulseAudio (on PipeWire ...)
 ```
 
-Если пути пустые — задайте свои маски через переменные окружения (см. ниже).
+### Права на /dev/input
+
+Демон читает события напрямую из `/dev/input/event*`. По умолчанию это доступно
+только группе `input`. Добавьте себя:
+
+```bash
+sudo usermod -aG input $USER
+```
+
+**Затем перезайдите в систему** — без этого группа не применится. Проверить:
+
+```bash
+id -nG | tr ' ' '\n' | grep -x input && echo "доступ есть"
+```
+
+Альтернатива без перелогина (сбрасывается при перезагрузке):
+
+```bash
+sudo setfacl -m u:$USER:rw /dev/input/event*
+```
+
+### Автозапуск
+
+`install.sh` создаёт `~/.config/autostart/fifine-ptt.desktop`. Это стандарт
+freedesktop, работает в GNOME, KDE, XFCE, Hyprland и прочих. Если ваша среда
+его не читает — добавьте запуск демона в свой способ автозагрузки:
+
+```
+FIFINE_TOUCH=1 ~/.local/bin/fifine-ptt
+```
+
+Для systemd-пользователя можно сделать юнит `~/.config/systemd/user/fifine-ptt.service`:
+
+```ini
+[Unit]
+Description=Push-to-talk для микрофона с кнопки мыши
+After=pipewire.service
+
+[Service]
+ExecStart=%h/.local/bin/fifine-ptt
+Environment=FIFINE_TOUCH=1
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now fifine-ptt
+```
+
+---
+
+## Перенос на другую машину
+
+Порядок именно такой, потому что имена устройств и источников на другом железе
+другие:
+
+1. `git clone` и `python3 fifine-setup.py` — он всё найдёт и запишет конфиг.
+2. `./install.sh` — установит и создаст автозапуск.
+3. Если что-то не нашлось — задайте вручную в `~/.config/fifine-ptt/env`.
+
+Конфиг `~/.config/fifine-ptt/env` переопределяет всё, но **переменные
+окружения имеют приоритет над конфигом** — можно разово переопределить, ничего
+не редактируя:
+
+```bash
+FIFINE_DEVICE_MATCH="Logitech" fifine-ptt --status
+```
 
 ---
 
@@ -110,18 +204,21 @@ release: вернул unmuted
 
 ## Переменные окружения
 
+Читаются из `~/.config/fifine-ptt/env` (создаётся `fifine-setup.py`).
+Переменные, заданные в окружении, имеют приоритет над файлом.
+
 | Переменная | По умолчанию | Смысл |
 |---|---|---|
-| `FIFINE_SOURCE` | имя источника Fifine | какой PulseAudio/PipeWire источник переключать |
+| `FIFINE_SOURCE` | имя источника Fifine | какой источник переключать |
 | `FIFINE_BTN` | `276` | код кнопки мыши (`BTN_EXTRA`) |
 | `FIFINE_DEVICE_MATCH` | `Beken USB Gaming Mouse` | подстрока имени устройства мыши |
-| `FIFINE_TOUCH` | выкл | включить синхронизацию с сенсорной кнопкой |
-| `FIFINE_TOUCH_BTN` | `256` | код сенсорной кнопки |
+| `FIFINE_TOUCH` | выкл | включить синхронизацию с кнопкой микрофона |
+| `FIFINE_TOUCH_BTN` | `256` | код кнопки микрофона |
 | `FIFINE_TOUCH_DEVICE_MATCH` | `fifine` | подстрока имени микрофона |
-| `FIFINE_OSD` | выкл | показывать всплывашку при переключении |
+| `FIFINE_OSD` | выкл | всплывашка при переключении (нужен `omarchy-osd`) |
 | `FIFINE_DEBUG` | выкл | писать переходы состояний в stderr |
 
-По умолчанию `FIFINE_TOUCH` **выключен**: обработка сенсорной кнопки меняет
+По умолчанию `FIFINE_TOUCH` **выключен**: обработка кнопки микрофона меняет
 поведение привычного физического контрола, поэтому включайте осознанно.
 
 ---
@@ -133,7 +230,7 @@ fifine-ptt                  # запустить демон (обычно чер
 fifine-ptt --status         # показать состояние и найденные устройства
 fifine-ptt-selftest         # прогнать тесты логики (6 сценариев)
 mic-status                  # состояние на двух уровнях: PipeWire и чип ALSA
-watch -n0.3 mic-status      # то же, но в реальном времени
+fifine-setup.py             # автопоиск железа и создание конфига
 ```
 
 `mic-status` — главный инструмент диагностики. Он показывает состояние сразу

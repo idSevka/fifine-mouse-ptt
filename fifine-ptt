@@ -33,6 +33,33 @@ import subprocess
 import sys
 import time
 
+
+# --------------------------------------------------------------- загрузка env
+def _load_config() -> None:
+    """Читает ~/.config/fifine-ptt/env в окружение, не перетирая уже заданное.
+
+    Нужен для переносимости: на другой машине имена устройств и источник
+    другие, и вместо правки кода достаточно один раз прогнать fifine-setup.py,
+    который запишет этот файл. Переменные, заданные вручную в окружении, имеют
+    приоритет — так можно разово переопределить конфиг, ничего не редактируя.
+    """
+    path = os.path.expanduser("~/.config/fifine-ptt/env")
+    try:
+        with open(path) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key, value = key.strip(), value.strip().strip("'\"")
+                os.environ.setdefault(key, value)
+    except OSError:
+        pass          # конфига нет — работаем на дефолтах
+
+
+_load_config()
+
+
 SOURCE = os.environ.get(
     "FIFINE_SOURCE",
     "alsa_input.usb-fifine_Microphones_fifine_Microphone_REV1.0-00.analog-stereo",
@@ -74,6 +101,29 @@ def log(message: str) -> None:
 # ------------------------------------------------------------------ pactl слой
 def _pactl(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["pactl", *args], capture_output=True, text=True)
+
+
+def source_available() -> bool:
+    """Существует ли источник в звуковом сервере.
+
+    Без этой проверки неверное имя источника даёт худший из возможных
+    сценариев: is_muted() возвращает False (в выводе нет "Mute: yes"), демон
+    решает, что микрофон включён, set_muted() молча проваливается с ненулевым
+    кодом — и снаружи это выглядит как «кнопка не работает», без единой
+    подсказки о причине. На чужой машине это первое, обо что спотыкаешься.
+
+    Формат `pactl list sources short` — это индекс<TAB>имя<TAB>драйвер..., то
+    есть ИМЯ ВО ВТОРОМ ПОЛЕ. Первое поле — числовой индекс, и проверка по нему
+    всегда даёт False.
+    """
+    out = _pactl("list", "sources", "short")
+    if out.returncode != 0:
+        return False
+    for line in out.stdout.splitlines():
+        fields = line.split("\t")
+        if len(fields) >= 2 and fields[1] == SOURCE:
+            return True
+    return False
 
 
 def is_muted() -> bool:
@@ -256,11 +306,26 @@ class HoldMic:
 
 def run_daemon() -> int:
     mic = HoldMic()
+
+    # Проверяем звуковой сервер ДО того, как уйти в цикл: иначе неверный
+    # источник даёт «кнопка нажимается, но ничего не происходит» без объяснений.
+    if not source_available():
+        print(f"Источник '{SOURCE}' не найден в звуковом сервере.\n"
+              f"Посмотреть доступные:\n"
+              f"    pactl list sources short\n"
+              f"и задать свой:\n"
+              f"    FIFINE_SOURCE=<имя> fifine-ptt",
+              file=sys.stderr)
+        return 1
+
     fds = open_nodes(find_event_nodes(DEVICE_MATCH))
     if not fds:
-        print(f"Не найдено evdev-устройство с BTN_EXTRA по маске "
-              f"'{DEVICE_MATCH}'.\n"
-              f"Проверь подключение мыши или задай FIFINE_DEVICE_MATCH.",
+        print(f"Не найдено evdev-устройство с кодом {list(BINDINGS)[0]} "
+              f"по маске '{DEVICE_MATCH}'.\n"
+              f"Посмотреть устройства и их коды:\n"
+              f"    python3 scripts/mouse-hid-sniff.py 20   # нажать кнопку в это время\n"
+              f"и задать свои:\n"
+              f"    FIFINE_DEVICE_MATCH='<часть имени>' FIFINE_BTN=<код> fifine-ptt",
               file=sys.stderr)
         return 1
 
