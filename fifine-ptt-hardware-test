@@ -1,0 +1,279 @@
+#!/usr/bin/env python3
+"""Живой тест железа: измеряет, что кнопка реально присылает.
+
+Отличие от fifine-ptt-selftest: тот проверяет ЛОГИКУ на симулированных
+событиях и не может упасть по причине, лежащей ниже кода. Этот скрипт наоборот
+смотрит только на железо:
+
+  * сколько событий приходит на одно физическое нажатие;
+  * длится ли удержание столько, сколько ты держишь кнопку;
+  * нет ли автоповторов, дребезга и двойных срабатываний прошивки.
+
+Это ловит проблемы, которые симуляция не поймает: мышь с макросом, которая
+превращает одно нажатие в пару press/release; кнопка с дребезгом; прошивка,
+шлющая автоповторы. На таких устройствах ЛЮБАЯ схема «press → hold → release»
+вырождается, и никакая правка логики не поможет.
+
+    fifine-ptt-hardware-test              # тест боковой кнопки мыши
+    fifine-ptt-hardware-test --device X   # тест другого устройства по имени
+
+Запускай и следуй подсказкам. Код возврата: 0 = всё чисто, 1 = есть проблемы.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import select
+import struct
+import sys
+import time
+
+EV_KEY = 1
+EV_SIZE = struct.calcsize("llHHi")
+
+# Ожидания, по которым судим о здоровье кнопки.
+MIN_HOLD = 0.8          # короче — считаем, что удержания не было
+DEBOUNCE_WINDOW = 0.05  # события ближе этого — дребезг
+AUTOREPEAT_WINDOW = 0.15  # повторные press с таким интервалом — автоповтор
+
+
+def dev_name(node: str) -> str:
+    entry = os.path.basename(node)
+    try:
+        return open(f"/sys/class/input/{entry}/device/name").read().strip()
+    except OSError:
+        return "?"
+
+
+def _key_bit_set(caps: str, code: int) -> bool:
+    words = caps.split()
+    index, offset = divmod(code, 64)
+    if index >= len(words):
+        return False
+    return bool(int(words[len(words) - 1 - index], 16) >> offset & 1)
+
+
+def find_devices(match: str) -> list[str]:
+    nodes = []
+    base = "/dev/input"
+    if not os.path.isdir(base):
+        return nodes
+    for entry in sorted(os.listdir(base)):
+        if not entry.startswith("event"):
+            continue
+        try:
+            name = open(f"/sys/class/input/{entry}/device/name").read().strip()
+            caps = open(f"/sys/class/input/{entry}/device/capabilities/key").read()
+        except OSError:
+            continue
+        # Устройство с кнопками мыши: проверяем BTN_LEFT, он есть у любой мыши.
+        if match.lower() in name.lower() and _key_bit_set(caps, 272):
+            nodes.append(f"{base}/{entry}")
+    return nodes
+
+
+class Press:
+    """Одно физическое нажатие: сборка событий в интервал."""
+
+    def __init__(self, code: int, down_at: float) -> None:
+        self.code = code
+        self.down_at = down_at
+        self.up_at: float | None = None
+        self.extra_downs: list[float] = []
+        self.extra_ups: list[float] = []
+
+    @property
+    def duration(self) -> float | None:
+        return None if self.up_at is None else self.up_at - self.down_at
+
+    @property
+    def closed(self) -> bool:
+        return self.up_at is not None
+
+
+def capture(nodes: list[str], seconds: int, code_filter: int | None
+            ) -> tuple[list[Press], dict[str, int]]:
+    """Собирает нажатия за указанное время. Возвращает (presses, счётчик событий)."""
+    fds: dict[int, str] = {}
+    for node in nodes:
+        try:
+            fds[os.open(node, os.O_RDONLY | os.O_NONBLOCK)] = node
+        except OSError as err:
+            print(f"  ! не открыть {node}: {err}", file=sys.stderr)
+
+    raw_counter: dict[str, int] = {}
+    presses: list[Press] = []
+    current: Press | None = None
+    deadline = time.time() + seconds
+
+    try:
+        while time.time() < deadline:
+            ready, _, _ = select.select(list(fds), [], [], 0.2)
+            for fd in ready:
+                try:
+                    data = os.read(fd, 4096)
+                except OSError:
+                    continue
+                for off in range(0, len(data) - EV_SIZE + 1, EV_SIZE):
+                    chunk = data[off:off + EV_SIZE]
+                    if len(chunk) < EV_SIZE:
+                        break
+                    _, _, etype, code, value = struct.unpack("llHHi", chunk)
+                    if etype != EV_KEY:
+                        continue
+                    label = f"{dev_name(fds[fd])}::code{code}"
+                    raw_counter[label] = raw_counter.get(label, 0) + 1
+                    if code_filter is not None and code != code_filter:
+                        continue
+                    now = time.time()
+                    if value == 1:
+                        if current is None or current.closed:
+                            current = Press(code, now)
+                            presses.append(current)
+                        else:
+                            # press при уже зажатой кнопке — это автоповтор
+                            current.extra_downs.append(now)
+                    elif value == 0 and current is not None and not current.closed:
+                        current.up_at = now
+                    elif value == 0 and current is not None and current.closed:
+                        current.extra_ups.append(now)
+    finally:
+        for fd in fds:
+            os.close(fd)
+    return presses, raw_counter
+
+
+def analyse(presses: list[Press]) -> tuple[list[str], list[str]]:
+    """Возвращает (проблемы, заметки)."""
+    problems: list[str] = []
+    notes: list[str] = []
+
+    if not presses:
+        problems.append("Не поймано ни одного нажатия.")
+        return problems, notes
+
+    for i, p in enumerate(presses, 1):
+        dur = p.duration
+        extra = len(p.extra_downs)
+
+        if dur is None:
+            problems.append(
+                f"Нажатие {i}: получен press, но НЕ пришёл release. "
+                f"Отпускание потеряно — hold-логика не сможет вернуть состояние.")
+            continue
+
+        if dur < DEBOUNCE_WINDOW:
+            problems.append(
+                f"Нажатие {i}: press и release через {dur*1000:.1f} мс — это "
+                f"дребезг или макрос прошивки, а не удержание.")
+
+        if extra:
+            notes.append(
+                f"Нажатие {i}: {extra} лишних press внутри удержания "
+                f"(автоповтор). Демон их игнорирует по флагу, но знать полезно.")
+
+        if dur >= MIN_HOLD:
+            notes.append(f"Нажатие {i}: удержание {dur:.2f} с — хорошее.")
+        elif dur >= DEBOUNCE_WINDOW:
+            notes.append(f"Нажатие {i}: короткое нажатие {dur:.3f} с (не удержание).")
+
+    return problems, notes
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--device", default="",
+                        help="подстрока имени устройства (по умолчанию любая мышь)")
+    parser.add_argument("--seconds", type=int, default=0,
+                        help="укоротить каждый шаг до N секунд (по умолчанию 10/12/15)")
+    parser.add_argument("--code", type=int, default=None,
+                        help="фильтровать только этот код кнопки")
+    args = parser.parse_args()
+
+    print("=== Живой тест железа ===")
+    print()
+
+    nodes = find_devices(args.device)
+    if not nodes:
+        print(f"Не найдено устройств с кнопками мыши"
+              f"{' по маске ' + repr(args.device) if args.device else ''}.")
+        print()
+        print("Посмотреть все устройства и их коды:")
+        print("    python3 scripts/mouse-hid-sniff.py 20")
+        return 1
+
+    print("Буду слушать:")
+    for n in nodes:
+        print(f"    {n}  {dev_name(n)}")
+    if not args.code:
+        print()
+        print("Совет: укажите --code <N>, чтобы видеть только одну кнопку.")
+    print()
+    steps = [
+        ("1/3  Нажми боковую кнопку ОДИН РАЗ, быстро (клик).", 10),
+        ("2/3  Нажми и ПОДЕРЖИ 2 секунды, потом отпусти.", 12),
+        ("3/3  Нажми и подержи 3 секунды, НЕ отпуская следи за временем, потом отпусти.", 15),
+    ]
+    if args.seconds:
+        steps = [(text, args.seconds) for text, _ in steps]
+
+    total = sum(d for _, d in steps)
+    print(f"Сейчас попрошу выполнить три действия. Всего {total} секунд.")
+
+    all_presses: list[Press] = []
+    counters: dict[str, int] = {}
+    for text, dur in steps:
+        print(f"--- {text}  (слушаю {dur} с)")
+        sys.stdout.flush()
+        presses, counter = capture(nodes, dur, args.code)
+        all_presses.extend(presses)
+        for k, v in counter.items():
+            counters[k] = counters.get(k, 0) + v
+        if presses:
+            for p in presses:
+                d = f"{p.duration:.3f} с" if p.duration is not None else "БЕЗ ОТПУСКАНИЯ"
+                print(f"      поймано: code={p.code}, длительность {d}, "
+                      f"лишних press={len(p.extra_downs)}")
+        else:
+            print("      ничего не поймано")
+        print()
+
+    print("=== Результат ===")
+    problems, notes = analyse(all_presses)
+
+    for n in notes:
+        print(f"  [ok]   {n}")
+    for p in problems:
+        print(f"  [FAIL] {p}")
+
+    print()
+    print("=== Все события за тест (по устройству и коду) ===")
+    for k in sorted(counters):
+        print(f"  {counters[k]:4}  {k}")
+    seen = {f"code{p.code}" for p in all_presses}
+    if args.code is None and len(seen) > 1:
+        print()
+        print(f"  Замечено кодов: {', '.join(sorted(seen))} — если ты жал одну")
+        print(f"  кнопку, а кодов несколько, устройство шлёт составное событие.")
+        print(f"  Зафиксируй нужный через --code <N>.")
+
+    print()
+    if problems:
+        print(f"ИТОГ: найдено проблем — {len(problems)}. Смотри [FAIL] выше.")
+        print("Если press и release приходят мгновенно парой, это прошивка или")
+        print("макрос мыши: hold-логика на таком устройстве работать не будет.")
+        return 1
+
+    print("ИТОГ: железо отдаёт корректные события, hold-логика применима.")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print()
+        print("Прервано.")
+        sys.exit(130)

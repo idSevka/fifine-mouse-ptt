@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 import select
 import shutil
@@ -24,6 +25,8 @@ EV_KEY = 1
 EV_SIZE = struct.calcsize("llHHi")
 CONFIG_DIR = os.path.expanduser("~/.config/fifine-ptt")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "env")
+
+PICK_SOURCE = False   # --pick: спрашивать микрофон даже если есть по умолчанию
 
 
 def say(msg: str = "") -> None:
@@ -77,12 +80,29 @@ def check_prerequisites() -> bool:
 
 
 def pick_source() -> str | None:
+    """Выбор микрофона.
+
+    Если источник по умолчанию существует — берём его молча: в подавляющем
+    большинстве случаев нужен именно он, и лишний вопрос только мешает. Список
+    показываем лишь когда источника по умолчанию нет или пользователь явно
+    попросил выбрать (аргумент --pick).
+    """
     say()
     say("== Микрофон")
+
+    current = default_source()
+    if current and not PICK_SOURCE:
+        say(f"   Взят источник по умолчанию: {current}")
+        say("   (выбрать другой: fifine-setup.py --pick)")
+        return current
+
     r = subprocess.run(["pactl", "list", "sources", "short"],
                        capture_output=True, text=True)
     if r.returncode != 0 or not r.stdout.strip():
         say("   Не удалось получить список источников.")
+        if current:
+            say(f"   Беру источник по умолчанию: {current}")
+            return current
         return None
 
     sources = []
@@ -91,19 +111,23 @@ def pick_source() -> str | None:
         if len(parts) >= 2:
             sources.append(parts[1])
 
+    if not sources:
+        say("   Источников не найдено.")
+        return current
+
     say("   Доступные источники:")
     for i, name in enumerate(sources, 1):
-        mark = "  <- по умолчанию" if name == default_source() else ""
+        mark = "  <- по умолчанию" if name == current else ""
         say(f"     {i}) {name}{mark}")
 
-    answer = input("\n   Номер микрофона (Enter = по умолчанию): ").strip()
+    answer = input(f"\n   Номер микрофона (Enter = {current or 'первый'}): ").strip()
     if not answer:
-        return default_source()
+        return current or sources[0]
     try:
         return sources[int(answer) - 1]
     except (ValueError, IndexError):
-        say("   Не понял номер, беру источник по умолчанию.")
-        return default_source()
+        say("   Не понял номер, беру первый.")
+        return current or sources[0]
 
 
 def default_source() -> str | None:
@@ -160,8 +184,30 @@ def capture_one_press(prompt: str, seconds: int = 25) -> tuple[str, str, int] | 
 
 
 def main() -> int:
+    global PICK_SOURCE
+
+    parser = argparse.ArgumentParser(
+        description="Автопоиск железа и создание конфига для fifine-ptt")
+    parser.add_argument("--pick", action="store_true",
+                        help="спрашивать микрофон, даже если есть источник по умолчанию")
+    parser.add_argument("--config-only", action="store_true",
+                        help="не трогать устройства, только показать текущий конфиг")
+    args = parser.parse_args()
+    PICK_SOURCE = args.pick
+
     say("=== Настройка fifine-mouse-ptt ===")
     say()
+
+    if args.config_only:
+        if os.path.exists(CONFIG_FILE):
+            say(f"Текущий конфиг: {CONFIG_FILE}")
+            say()
+            with open(CONFIG_FILE) as fh:
+                say(fh.read().rstrip())
+        else:
+            say(f"Конфига нет: {CONFIG_FILE}")
+            say("Запусти без --config-only, чтобы создать.")
+        return 0
 
     if not check_prerequisites():
         say()
@@ -207,20 +253,64 @@ def main() -> int:
             say("   Не поймал — синхронизацию пропускаю.")
 
     # ---------------------------------------------------------------- запись
+    # Каждой строке — комментарий: файл открывают руками, когда что-то не
+    # работает, и в этот момент понимать смысл полей важнее краткости.
     os.makedirs(CONFIG_DIR, exist_ok=True)
     lines = [
-        "# Конфиг fifine-ptt, создан fifine-setup.py",
-        "# Загружается демоном автоматически, если файл существует.",
+        "# Конфиг fifine-ptt. Создан fifine-setup.py.",
+        "#",
+        "# Демон читает этот файл при запуске. Переменные, заданные в окружении,",
+        "# имеют приоритет: можно разово переопределить, не редактируя файл, —",
+        "#     FIFINE_DEVICE_MATCH='Logitech' fifine-ptt --status",
+        "#",
+        "# Формат: KEY=значение. Символ # начинает комментарий.",
+        "",
+        "# Какой источник звука переключать. Посмотреть все:",
+        "#     pactl list sources short",
         f"FIFINE_SOURCE={src}",
+        "",
+        "# Мышь: подстрока имени устройства и код кнопки. Имя берётся как есть из",
+        "# /sys/class/input/eventN/device/name, номер event-узла НЕ подходит —",
+        "# номера меняются при переподключении, имена нет.",
+        "# Посмотреть устройства:  python3 mouse-hid-sniff.py 20",
         f"FIFINE_DEVICE_MATCH={mask}",
+        f"# {mouse_code} = BTN_EXTRA (боковая кнопка). Другие: 272 левая, 273 правая,",
+        "# 274 колесо, 275 и 276 боковые.",
         f"FIFINE_BTN={mouse_code}",
     ]
     if touch_enabled:
         lines += [
+            "",
+            "# Кнопка на корпусе микрофона. У устройства может быть ДВА независимых",
+            "# гейта мьюта: аппаратный (его показывает светодиод) и программный",
+            "# (Mic Capture Switch, который видят приложения). Светодиод слушает оба,",
+            "# система — только программный. FIFINE_TOUCH=1 заставляет демон слушать",
+            "# эту кнопку и приводить программный гейт в соответствие с ней.",
+            "# Подробности: docs/how-it-works.md",
             "FIFINE_TOUCH=1",
             f"FIFINE_TOUCH_DEVICE_MATCH={touch_mask}",
+            f"# {touch_code} = BTN_0/KEY_BUTTONCONFIG у этого устройства.",
             f"FIFINE_TOUCH_BTN={touch_code}",
         ]
+    else:
+        lines += [
+            "",
+            "# Синхронизация с кнопкой микрофона не настроена. Если у микрофона есть",
+            "# своя кнопка мьюта — раскомментируй и подставь значения:",
+            "# FIFINE_TOUCH=1",
+            "# FIFINE_TOUCH_DEVICE_MATCH=<подстрока имени микрофона>",
+            "# FIFINE_TOUCH_BTN=<код кнопки>",
+        ]
+    lines += [
+        "",
+        "# Всплывашка при переключении. Требует omarchy-osd (только Omarchy) —",
+        "# на других системах оставь закомментированным, иначе просто не сработает.",
+        "# FIFINE_OSD=1",
+        "",
+        "# Отладка: писать каждый переход состояния в stderr.",
+        "# Удобно запускать так:  FIFINE_DEBUG=1 fifine-ptt",
+        "# FIFINE_DEBUG=1",
+    ]
     with open(CONFIG_FILE, "w") as fh:
         fh.write("\n".join(lines) + "\n")
 

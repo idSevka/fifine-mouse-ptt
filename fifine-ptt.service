@@ -1,0 +1,26 @@
+[Unit]
+Description=Push-to-talk / push-to-mute for a USB microphone via mouse side button
+Documentation=https://github.com/idSevka/fifine-mouse-ptt
+# Демон управляет микрофоном через pactl, поэтому звуковой сервер должен быть
+# готов. Wants вместо Requires: если PipeWire перезапустится, юнит не умрёт.
+After=pipewire.service pipewire-pulse.service
+Wants=pipewire.service pipewire-pulse.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/fifine-ptt
+# FIFINE_TOUCH=1 включает синхронизацию с кнопкой на корпусе микрофона.
+# Уберите, если нужна только боковая кнопка мыши.
+Environment=FIFINE_TOUCH=1
+# НЕ добавляйте сюда SupplementaryGroups=input: пользовательские юниты systemd
+# не могут менять группы (падает с "Changing group credentials failed:
+# Operation not permitted", status=216/GROUP). Группа input должна быть у самого
+# пользователя — sudo usermod -aG input $USER, затем перелогин. После этого она
+# наследуется всеми его процессами, включая этот сервис.
+#
+# Проверить: id -nG | tr ' ' '\n' | grep -x input
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
