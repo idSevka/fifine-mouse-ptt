@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Показывает РЕАЛЬНОЕ состояние микрофона сразу на двух уровнях:
+# PipeWire и аппаратный capture switch в USB-чипе.
+#
+# Зачем: индикатор-надпись и всплывашки показывают то, что решила программа,
+# а не то, что произошло с железом. Для проверки поведения кнопки сверяйся
+# только с этим выводом.
+#
+#   mic-status          # один раз посмотреть
+#   watch -n0.3 mic-status    # следить в реальном времени, пока жмёшь кнопку
+set -u
+
+# Источник: либо задан явно, либо берём источник по умолчанию из PipeWire.
+SOURCE="${FIFINE_SOURCE:-$(pactl get-default-source 2>/dev/null || true)}"
+if [ -z "${SOURCE:-}" ]; then
+  echo "Не удалось определить источник. Задайте FIFINE_SOURCE=..." >&2
+  exit 1
+fi
+
+# Карта ALSA и имя capture-контрола: определяем по источнику, без хардкода.
+# Источник вида alsa_input.usb-<card>... -> ищем карту с такой же картой/именем.
+card=""
+if [ -n "${FIFINE_ALSA_CARD:-}" ]; then
+  card="$FIFINE_ALSA_CARD"
+else
+  # api.alsa.card пишет сама PipeWire — это надёжнее разбора имени.
+  card=$(pactl list sources 2>/dev/null | awk -v s="$SOURCE" '
+    $0 ~ "Name: "s {found=1}
+    found && /api\.alsa\.card = / {gsub(/[^0-9]/,"",$3); print $3; exit}
+  ')
+fi
+
+pipewire_state=$(pactl get-source-mute "$SOURCE" 2>/dev/null | awk '{print $2}')
+
+# Единственный capture-контрол со switch обычно называется 'Mic' или 'Capture'.
+alsa_state=""
+if [ -n "${card:-}" ]; then
+  for ctl in Mic Capture; do
+    out=$(amixer -c "$card" sget "$ctl" 2>/dev/null) || continue
+    # берём последний [on]/[off] — это состояние capture-канала
+    alsa_state=$(printf '%s' "$out" | grep -o '\[\(on\|off\)\]' | tail -1 | tr -d '[]')
+    [ -n "$alsa_state" ] && break
+  done
+fi
+
+human() {
+  case "$1" in
+    yes|off) echo "ВЫКЛЮЧЕН (muted)" ;;
+    no|on)   echo "ВКЛЮЧЁН (live)" ;;
+    *)       echo "неизвестно" ;;
+  esac
+}
+
+printf '%-14s %-12s %s\n' "$(date +%H:%M:%S)" "PipeWire:" "$(human "${pipewire_state:-?}")   [${pipewire_state:-?}]"
+if [ -n "${alsa_state:-}" ]; then
+  printf '%-14s %-12s %s\n' "" "ALSA (чип):" "$(human "$alsa_state")   [$alsa_state]  (карта $card)"
+else
+  printf '%-14s %-12s %s\n' "" "ALSA (чип):" "не прочитать (карта ${card:-не определена})"
+fi
+
+if [ -n "${pipewire_state:-}" ] && [ -n "${alsa_state:-}" ]; then
+  expected_alsa=$([ "$pipewire_state" = "yes" ] && echo off || echo on)
+  if [ "$alsa_state" != "$expected_alsa" ]; then
+    echo "!! РАСХОЖДЕНИЕ: PipeWire и чип показывают разное — вот это и есть баг,"
+    echo "   а не логика кнопки. Сообщи этот вывод."
+  fi
+fi

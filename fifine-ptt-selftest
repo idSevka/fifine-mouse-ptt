@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+"""Тест логики fifine-ptt: прогоняет сценарии, которые ломали старый bash-скрипт.
+
+Запуск: python3 ~/.local/bin/fifine-ptt-selftest
+Ничего не устанавливает, только дёргает HoldMic и проверяет итоговое mute-состояние.
+"""
+import importlib.machinery
+import importlib.util
+import os
+import subprocess
+import sys
+
+PATH = os.environ.get(
+    "FIFINE_PTT_PATH",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "fifine-ptt"),
+)
+
+
+def load():
+    loader = importlib.machinery.SourceFileLoader("fifine_ptt", PATH)
+    spec = importlib.util.spec_from_loader("fifine_ptt", loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def mute_state(source):
+    out = subprocess.run(["pactl", "get-source-mute", source],
+                         capture_output=True, text=True).stdout
+    return "yes" if "Mute: yes" in out else "no"
+
+
+def run_scenario(name, start_muted, presses, expect_muted):
+    m = load()
+    subprocess.run(["pactl", "set-source-mute", m.SOURCE,
+                    "1" if start_muted else "0"], capture_output=True)
+    mic = m.HoldMic()
+
+    trace = []
+    mic.on_press()
+    trace.append(f"press -> {mute_state(m.SOURCE)}")
+    for _ in range(presses):                 # лишние press = автоповторы
+        mic.on_press()
+        trace.append(f"повтор -> {mute_state(m.SOURCE)}")
+    mic.on_release()
+    trace.append(f"release -> {mute_state(m.SOURCE)}")
+
+    final = mute_state(m.SOURCE)
+    ok = final == expect_muted
+    verdict = "OK  " if ok else "FAIL"
+    print(f"[{verdict}] {name}")
+    print(f"        старт={'muted' if start_muted else 'unmuted'}, "
+          f"лишних press={presses}, ожидали вернуться в "
+          f"{'muted' if expect_muted else 'unmuted'}")
+    for line in trace:
+        print(f"          {line}")
+    return ok
+
+
+def main():
+    results = [
+        # обычное удержание: микрофон ВКЛ -> на время удержания ВЫКЛ -> обратно ВКЛ
+        run_scenario("push-to-mute, без повторов", False, 0, "no"),
+        # микрофон ВЫКЛ -> на время удержания ВКЛ -> обратно ВЫКЛ
+        run_scenario("push-to-talk, без повторов", True, 0, "yes"),
+        # и то, что раньше ломалось: лишние press при зажатой кнопке
+        run_scenario("push-to-mute + 1 автоповтор", False, 1, "no"),
+        run_scenario("push-to-mute + 5 автоповторов", False, 5, "no"),
+        run_scenario("push-to-talk + 1 автоповтор", True, 1, "yes"),
+        run_scenario("push-to-talk + 5 автоповторов", True, 5, "yes"),
+    ]
+    print()
+    print(f"итог: {sum(results)}/{len(results)} сценариев прошли")
+    return 0 if all(results) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
