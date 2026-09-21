@@ -46,7 +46,7 @@ press и на release, а логику положить в скрипт с фа�
 ## Установка
 
 ```bash
-git clone https://github.com/<ваш-логин>/fifine-mouse-ptt.git
+git clone https://github.com/idSevka/fifine-mouse-ptt.git
 cd fifine-mouse-ptt
 ./install.sh
 ```
