@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import os
 import select
 import struct
@@ -383,6 +384,40 @@ def run_daemon() -> int:
             os.close(fd)
 
 
+def acquire_singleton_lock() -> "IO[str] | None":
+    """Взять эксклюзивную блокировку, чтобы демон не поднялся вторым инстансом.
+
+    Возвращает открытый файл блокировки (держать до выхода из процесса) или
+    None, если другой экземпляр уже работает.
+
+    Зачем: у демона два независимых канала автозапуска в прошлом (systemd --user
+    и ~/.config/autostart), и случайное возвращение второго приводило к двум
+    процессам, читающим одну и ту же кнопку мыши. Оба видели press, оба
+    переворачивали микрофон -- и при отпускании возвращали состояние дважды,
+    то есть в исходное, а снаружи выглядело как «кнопка не работает».
+
+    flock (а не файл с pid) выбран сознательно: ядро снимает блокировку само при
+    завершении процесса, поэтому убитый `kill -9` демон не оставляет после себя
+    «залипший» замок, из-за которого следующий запуск отказывался бы стартовать.
+    """
+    path = os.path.expanduser("~/.run/fifine-ptt.lock")
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        lock = open(path, "w")
+    except OSError:
+        return None          # не можем создать файл -- не наша проблема, работаем
+
+    try:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lock.close()
+        return False         # замок занят другим живым экземпляром
+
+    lock.write(f"{os.getpid()}\n")
+    lock.flush()
+    return lock
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--status", action="store_true",
@@ -396,6 +431,17 @@ def main() -> int:
         print(f"мышь:      {find_event_nodes(DEVICE_MATCH) or 'не найдены'}")
         print(f"сенсорная: {find_touch_nodes() or 'не найдена'}"
               f"  (обработка: {'ВКЛ' if TOUCH_BUTTON_ENABLED else 'выкл'})")
+        return 0
+
+    # --status только читает состояние и выходит, замок ему не нужен.
+    lock = acquire_singleton_lock()
+    if lock is False:
+        # Печатаем БЕЗУСЛОВНО, не через log(): log() молчит без FIFINE_DEBUG,
+        # а именно этот выход нужно видеть всегда. Иначе второй инстанс тихо
+        # исчезает, и «почему не работает после добавления второго автозапуска»
+        # остаётся без единой подсказки в журнале systemd.
+        print("fifine-ptt уже запущен другим экземпляром — выходим "
+              "(защита от двойного автозапуска)", file=sys.stderr, flush=True)
         return 0
 
     return run_daemon()

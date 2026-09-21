@@ -69,6 +69,14 @@ fi
 
 case "$MODE" in
   systemd)
+    # Убираем .desktop-автозапуск, если он остался от прошлого запуска
+    # install.sh с --desktop: два канала = два демона на одной кнопке.
+    # Сам демон тоже защищён flock'ом, но чистка здесь избавляет от
+    # неочевидного «второй процесс молча выходит» в логах.
+    if [ -e "${AUTOSTART}/${NAME}.desktop" ]; then
+      rm -f "${AUTOSTART}/${NAME}.desktop"
+      echo "    [i] удалён старый ${AUTOSTART}/${NAME}.desktop (иначе был бы двойной запуск)"
+    fi
     mkdir -p "$UNITDIR"
     install -Dm644 "${HERE}/${NAME}.service" "${UNITDIR}/${NAME}.service"
     systemctl --user daemon-reload

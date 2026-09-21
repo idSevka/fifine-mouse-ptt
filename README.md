@@ -137,6 +137,31 @@ a freedesktop standard honoured by GNOME, KDE, XFCE, Hyprland and others.
 Do not enable both at once — two daemons fighting over the same mute state will
 misbehave. `install.sh` warns about this.
 
+The daemon also refuses to start a second instance on its own, so a stray
+autostart entry can no longer cause two processes to fight over the button. It
+takes an exclusive `flock` on `~/.run/fifine-ptt.lock`; the second instance
+exits immediately with status 0 and prints why:
+
+```
+fifine-ptt уже запущен другим экземпляром — выходим (защита от двойного автозапуска)
+```
+
+This matters because two daemons read the same button: both see `press`, both
+flip the mic, and on release the state is restored twice — i.e. back to where it
+started. From the outside that looks like a dead button with no error anywhere.
+
+`flock` is used rather than a pid file so the kernel releases the lock when the
+process dies — `kill -9` cannot leave a stale lock that blocks the next start.
+
+Check that exactly one instance is running:
+
+```bash
+pgrep -fa fifine-ptt          # one process
+cat ~/.run/fifine-ptt.lock    # pid of the running daemon
+```
+
+`--status` does not take the lock, so it always works alongside a running daemon.
+
 ---
 
 ## Moving to another machine
