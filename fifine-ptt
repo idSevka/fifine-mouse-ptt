@@ -227,6 +227,39 @@ def open_nodes(nodes: list[str]) -> dict[int, str]:
     return fds
 
 
+def sync_nodes(fds: dict[int, str], nodes: list[str]) -> list[str]:
+    """Закрыть пропавшие узлы и открыть новые после USB hotplug."""
+    wanted = set(nodes)
+    removed = []
+    for fd, node in list(fds.items()):
+        if node not in wanted:
+            fds.pop(fd)
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            removed.append(node)
+            log(f"устройство отключено: {node}")
+    current = set(fds.values())
+    for node in nodes:
+        if node not in current:
+            opened = open_nodes([node])
+            fds.update(opened)
+            if opened:
+                log(f"устройство подключено: {node}")
+    return removed
+
+
+def drop_fd(fds: dict[int, str], fd: int) -> None:
+    node = fds.pop(fd, None)
+    if node is not None:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        log(f"потеряно устройство: {node}")
+
+
 # ------------------------------------------------------------------- основное
 class HoldMic:
     def __init__(self) -> None:
@@ -263,6 +296,15 @@ class HoldMic:
         # Никакого notify: состояние уже показано при нажатии, а удержание —
         # одно действие пользователя. Второе сообщение читается как второе
         # событие и путает ("почему при отпускании пишет, что включён?").
+
+    def on_device_lost(self) -> None:
+        """Восстановить исходный mute, если USB-мышь пропала при удержании."""
+        if self.pressed and self.saved_muted is not None:
+            restore = self.saved_muted
+            self.pressed = False
+            self.saved_muted = None
+            set_muted(restore)
+            log("мышь отключена: восстановил исходное состояние микрофона")
 
     def on_touch_button(self) -> None:
         """Сенсорная кнопка на корпусе микрофона (event7, code 256).
@@ -319,38 +361,64 @@ def run_daemon() -> int:
               file=sys.stderr)
         return 1
 
+    # Устройства перепоискаются: eventN меняется после USB hotplug.
     fds = open_nodes(find_event_nodes(DEVICE_MATCH))
-    if not fds:
-        print(f"Не найдено evdev-устройство с кодом {list(BINDINGS)[0]} "
-              f"по маске '{DEVICE_MATCH}'.\n"
-              f"Посмотреть устройства и их коды:\n"
-              f"    python3 scripts/mouse-hid-sniff.py 20   # нажать кнопку в это время\n"
-              f"и задать свои:\n"
-              f"    FIFINE_DEVICE_MATCH='<часть имени>' FIFINE_BTN=<код> fifine-ptt",
-              file=sys.stderr)
-        return 1
-
-    # Устройство сенсорной кнопки микрофона подключаем отдельно: это другое
-    # физическое устройство и другой код (256). Если его нет — не ошибка,
-    # базовый режим (только боковая кнопка мыши) продолжает работать.
     touch_fds: dict[int, str] = {}
     if TOUCH_BUTTON_ENABLED:
         touch_fds = open_nodes(find_touch_nodes())
         if not touch_fds:
             log("сенсорная кнопка включена, но устройство микрофона не найдено")
 
-    for fd, node in {**fds, **touch_fds}.items():
-        log(f"слушаю {node}")
-
     watch = {**fds, **touch_fds}
+    for node in watch.values():
+        log(f"слушаю {node}")
+    if not fds:
+        log("мышь пока не найдена; жду подключения")
+    scan_interval = 1.0
+    last_scan = 0.0
 
     try:
         while True:
-            ready, _, _ = select.select(list(watch), [], [], 1.0)
+            now = time.monotonic()
+            if now - last_scan >= scan_interval:
+                removed = sync_nodes(fds, find_event_nodes(DEVICE_MATCH))
+                sync_nodes(touch_fds,
+                           find_touch_nodes() if TOUCH_BUTTON_ENABLED else [])
+                if removed:
+                    mic.on_device_lost()
+                watch = {**fds, **touch_fds}
+                last_scan = now
+
+            try:
+                ready, _, _ = select.select(list(watch), [], [], scan_interval)
+            except (OSError, ValueError) as err:
+                log(f"ошибка select: {err}; перепоискаю устройства")
+                for fd in list(fds):
+                    drop_fd(fds, fd)
+                for fd in list(touch_fds):
+                    drop_fd(touch_fds, fd)
+                if mic.pressed:
+                    mic.on_device_lost()
+                watch = {}
+                last_scan = 0.0
+                continue
+
             for fd in ready:
+                source_fds = touch_fds if fd in touch_fds else fds
                 try:
                     data = os.read(fd, 4096)
-                except OSError:
+                except OSError as err:
+                    log(f"ошибка чтения {source_fds.get(fd, fd)}: {err}")
+                    drop_fd(source_fds, fd)
+                    if source_fds is fds:
+                        mic.on_device_lost()
+                    last_scan = 0.0
+                    continue
+                if not data:
+                    drop_fd(source_fds, fd)
+                    if source_fds is fds:
+                        mic.on_device_lost()
+                    last_scan = 0.0
                     continue
                 is_touch = fd in touch_fds
                 for offset in range(0, len(data) - EV_SIZE + 1, EV_SIZE):
@@ -380,8 +448,11 @@ def run_daemon() -> int:
             log("остановлен: восстановил состояние")
         return 0
     finally:
-        for fd in watch:
-            os.close(fd)
+        for fd in {**fds, **touch_fds}:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 
 def acquire_singleton_lock() -> "IO[str] | None":
