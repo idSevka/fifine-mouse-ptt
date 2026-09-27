@@ -1,23 +1,22 @@
 #!/usr/bin/env python3
-"""Живой тест железа: измеряет, что кнопка реально присылает.
+"""Live hardware test: measures what the button actually sends.
 
-Отличие от fifine-ptt-selftest: тот проверяет ЛОГИКУ на симулированных
-событиях и не может упасть по причине, лежащей ниже кода. Этот скрипт наоборот
-смотрит только на железо:
+Unlike fifine-ptt-selftest, which tests LOGIC using simulated events and cannot
+fail due to an issue below the code, this script checks only the hardware:
 
-  * сколько событий приходит на одно физическое нажатие;
-  * длится ли удержание столько, сколько ты держишь кнопку;
-  * нет ли автоповторов, дребезга и двойных срабатываний прошивки.
+  * how many events arrive for one physical press;
+  * whether the hold lasts as long as you hold the button;
+  * whether there are auto-repeats, bounce, or firmware double-triggers.
 
-Это ловит проблемы, которые симуляция не поймает: мышь с макросом, которая
-превращает одно нажатие в пару press/release; кнопка с дребезгом; прошивка,
-шлющая автоповторы. На таких устройствах ЛЮБАЯ схема «press → hold → release»
-вырождается, и никакая правка логики не поможет.
+This catches problems simulation cannot: a mouse macro that turns one press
+into a press/release pair; a bouncing button; firmware sending auto-repeats.
+On such devices, ANY "press → hold → release" scheme breaks down, and no logic
+change can help.
 
-    fifine-ptt-hardware-test              # тест боковой кнопки мыши
-    fifine-ptt-hardware-test --device X   # тест другого устройства по имени
+    fifine-ptt-hardware-test              # test the mouse side button
+    fifine-ptt-hardware-test --device X   # test another device by name
 
-Запускай и следуй подсказкам. Код возврата: 0 = всё чисто, 1 = есть проблемы.
+Run the script and follow the prompts. Exit code: 0 = clean, 1 = problems found.
 """
 
 from __future__ import annotations
@@ -32,10 +31,10 @@ import time
 EV_KEY = 1
 EV_SIZE = struct.calcsize("llHHi")
 
-# Ожидания, по которым судим о здоровье кнопки.
-MIN_HOLD = 0.8          # короче — считаем, что удержания не было
-DEBOUNCE_WINDOW = 0.05  # события ближе этого — дребезг
-AUTOREPEAT_WINDOW = 0.15  # повторные press с таким интервалом — автоповтор
+# Thresholds used to assess button health.
+MIN_HOLD = 0.8          # shorter means it was not a hold
+DEBOUNCE_WINDOW = 0.05  # events closer than this are considered bounce
+AUTOREPEAT_WINDOW = 0.15  # repeated presses at this interval are auto-repeat
 
 
 def dev_name(node: str) -> str:
@@ -67,14 +66,14 @@ def find_devices(match: str) -> list[str]:
             caps = open(f"/sys/class/input/{entry}/device/capabilities/key").read()
         except OSError:
             continue
-        # Устройство с кнопками мыши: проверяем BTN_LEFT, он есть у любой мыши.
+        # Mouse button device: check BTN_LEFT, which every mouse has.
         if match.lower() in name.lower() and _key_bit_set(caps, 272):
             nodes.append(f"{base}/{entry}")
     return nodes
 
 
 class Press:
-    """Одно физическое нажатие: сборка событий в интервал."""
+    """One physical press: events collected within an interval."""
 
     def __init__(self, code: int, down_at: float) -> None:
         self.code = code
@@ -94,13 +93,13 @@ class Press:
 
 def capture(nodes: list[str], seconds: int, code_filter: int | None
             ) -> tuple[list[Press], dict[str, int]]:
-    """Собирает нажатия за указанное время. Возвращает (presses, счётчик событий)."""
+    """Collect presses for the given duration. Returns (presses, event counts)."""
     fds: dict[int, str] = {}
     for node in nodes:
         try:
             fds[os.open(node, os.O_RDONLY | os.O_NONBLOCK)] = node
         except OSError as err:
-            print(f"  ! не открыть {node}: {err}", file=sys.stderr)
+            print(f"  ! cannot open {node}: {err}", file=sys.stderr)
 
     raw_counter: dict[str, int] = {}
     presses: list[Press] = []
@@ -132,7 +131,7 @@ def capture(nodes: list[str], seconds: int, code_filter: int | None
                             current = Press(code, now)
                             presses.append(current)
                         else:
-                            # press при уже зажатой кнопке — это автоповтор
+                            # A press while the button is already down is auto-repeat.
                             current.extra_downs.append(now)
                     elif value == 0 and current is not None and not current.closed:
                         current.up_at = now
@@ -145,12 +144,12 @@ def capture(nodes: list[str], seconds: int, code_filter: int | None
 
 
 def analyse(presses: list[Press]) -> tuple[list[str], list[str]]:
-    """Возвращает (проблемы, заметки)."""
+    """Return (problems, notes)."""
     problems: list[str] = []
     notes: list[str] = []
 
     if not presses:
-        problems.append("Не поймано ни одного нажатия.")
+        problems.append("No presses were detected.")
         return problems, notes
 
     for i, p in enumerate(presses, 1):
@@ -159,24 +158,24 @@ def analyse(presses: list[Press]) -> tuple[list[str], list[str]]:
 
         if dur is None:
             problems.append(
-                f"Нажатие {i}: получен press, но НЕ пришёл release. "
-                f"Отпускание потеряно — hold-логика не сможет вернуть состояние.")
+                f"Press {i}: received a press, but NO release arrived. "
+                f"The release was lost, so hold logic cannot restore the state.")
             continue
 
         if dur < DEBOUNCE_WINDOW:
             problems.append(
-                f"Нажатие {i}: press и release через {dur*1000:.1f} мс — это "
-                f"дребезг или макрос прошивки, а не удержание.")
+                f"Press {i}: press and release arrived after {dur*1000:.1f} ms — "
+                f"this is bounce or a firmware macro, not a hold.")
 
         if extra:
             notes.append(
-                f"Нажатие {i}: {extra} лишних press внутри удержания "
-                f"(автоповтор). Демон их игнорирует по флагу, но знать полезно.")
+                f"Press {i}: {extra} extra presses during the hold "
+                f"(auto-repeat). The daemon ignores them using a flag, but it is useful to know.")
 
         if dur >= MIN_HOLD:
-            notes.append(f"Нажатие {i}: удержание {dur:.2f} с — хорошее.")
+            notes.append(f"Press {i}: {dur:.2f} s hold — good.")
         elif dur >= DEBOUNCE_WINDOW:
-            notes.append(f"Нажатие {i}: короткое нажатие {dur:.3f} с (не удержание).")
+            notes.append(f"Press {i}: short press of {dur:.3f} s (not a hold).")
 
     return problems, notes
 
@@ -185,47 +184,47 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--device", default="",
-                        help="подстрока имени устройства (по умолчанию любая мышь)")
+                        help="substring of the device name (defaults to any mouse)")
     parser.add_argument("--seconds", type=int, default=0,
-                        help="укоротить каждый шаг до N секунд (по умолчанию 10/12/15)")
+                        help="shorten each step to N seconds (defaults to 10/12/15)")
     parser.add_argument("--code", type=int, default=None,
-                        help="фильтровать только этот код кнопки")
+                        help="filter for this button code only")
     args = parser.parse_args()
 
-    print("=== Живой тест железа ===")
+    print("=== Live hardware test ===")
     print()
 
     nodes = find_devices(args.device)
     if not nodes:
-        print(f"Не найдено устройств с кнопками мыши"
-              f"{' по маске ' + repr(args.device) if args.device else ''}.")
+        print(f"No mouse button devices found"
+              f"{' matching ' + repr(args.device) if args.device else ''}.")
         print()
-        print("Посмотреть все устройства и их коды:")
+        print("To see all devices and their codes:")
         print("    python3 scripts/mouse-hid-sniff.py 20")
         return 1
 
-    print("Буду слушать:")
+    print("Listening to:")
     for n in nodes:
         print(f"    {n}  {dev_name(n)}")
     if not args.code:
         print()
-        print("Совет: укажите --code <N>, чтобы видеть только одну кнопку.")
+        print("Tip: specify --code <N> to see only one button.")
     print()
     steps = [
-        ("1/3  Нажми боковую кнопку ОДИН РАЗ, быстро (клик).", 10),
-        ("2/3  Нажми и ПОДЕРЖИ 2 секунды, потом отпусти.", 12),
-        ("3/3  Нажми и подержи 3 секунды, НЕ отпуская следи за временем, потом отпусти.", 15),
+        ("1/3  Press the side button ONCE, quickly (a click).", 10),
+        ("2/3  Press and HOLD for 2 seconds, then release.", 12),
+        ("3/3  Press and hold for 3 seconds; watch the time without releasing, then release.", 15),
     ]
     if args.seconds:
         steps = [(text, args.seconds) for text, _ in steps]
 
     total = sum(d for _, d in steps)
-    print(f"Сейчас попрошу выполнить три действия. Всего {total} секунд.")
+    print(f"You will now be asked to perform three actions. {total} seconds total.")
 
     all_presses: list[Press] = []
     counters: dict[str, int] = {}
     for text, dur in steps:
-        print(f"--- {text}  (слушаю {dur} с)")
+        print(f"--- {text}  (listening for {dur} s)")
         sys.stdout.flush()
         presses, counter = capture(nodes, dur, args.code)
         all_presses.extend(presses)
@@ -233,14 +232,14 @@ def main() -> int:
             counters[k] = counters.get(k, 0) + v
         if presses:
             for p in presses:
-                d = f"{p.duration:.3f} с" if p.duration is not None else "БЕЗ ОТПУСКАНИЯ"
-                print(f"      поймано: code={p.code}, длительность {d}, "
-                      f"лишних press={len(p.extra_downs)}")
+                d = f"{p.duration:.3f} s" if p.duration is not None else "NO RELEASE"
+                print(f"      detected: code={p.code}, duration {d}, "
+                      f"extra presses={len(p.extra_downs)}")
         else:
-            print("      ничего не поймано")
+            print("      nothing detected")
         print()
 
-    print("=== Результат ===")
+    print("=== Results ===")
     problems, notes = analyse(all_presses)
 
     for n in notes:
@@ -249,24 +248,24 @@ def main() -> int:
         print(f"  [FAIL] {p}")
 
     print()
-    print("=== Все события за тест (по устройству и коду) ===")
+    print("=== All events during the test (by device and code) ===")
     for k in sorted(counters):
         print(f"  {counters[k]:4}  {k}")
     seen = {f"code{p.code}" for p in all_presses}
     if args.code is None and len(seen) > 1:
         print()
-        print(f"  Замечено кодов: {', '.join(sorted(seen))} — если ты жал одну")
-        print(f"  кнопку, а кодов несколько, устройство шлёт составное событие.")
-        print(f"  Зафиксируй нужный через --code <N>.")
+        print(f"  Codes observed: {', '.join(sorted(seen))} — if you pressed one")
+        print(f"  button but saw several codes, the device sends a composite event.")
+        print(f"  Select the desired code with --code <N>.")
 
     print()
     if problems:
-        print(f"ИТОГ: найдено проблем — {len(problems)}. Смотри [FAIL] выше.")
-        print("Если press и release приходят мгновенно парой, это прошивка или")
-        print("макрос мыши: hold-логика на таком устройстве работать не будет.")
+        print(f"SUMMARY: {len(problems)} problem(s) found. See [FAIL] above.")
+        print("If press and release arrive as an immediate pair, the cause is firmware or")
+        print("a mouse macro: hold logic will not work on this device.")
         return 1
 
-    print("ИТОГ: железо отдаёт корректные события, hold-логика применима.")
+    print("SUMMARY: the hardware sends valid events; hold logic can be used.")
     return 0
 
 
@@ -275,5 +274,5 @@ if __name__ == "__main__":
         sys.exit(main())
     except KeyboardInterrupt:
         print()
-        print("Прервано.")
+        print("Interrupted.")
         sys.exit(130)

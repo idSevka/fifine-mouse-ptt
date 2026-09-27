@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Установка fifine-mouse-ptt: копирует скрипты и настраивает автозапуск.
+# Install fifine-mouse-ptt: copy scripts and configure autostart.
 #
-# Автозапуск двумя способами на выбор:
-#   systemd --user  — надёжнее: перезапускает демон при падении (рекомендуется)
-#   .desktop        — проще: стандарт freedesktop, без systemd
+# Choose one of two autostart methods:
+#   systemd --user  — more reliable: restarts the daemon after a failure (recommended)
+#   .desktop        — simpler: freedesktop standard, without systemd
 #
-# Способ можно задать флагом:   ./install.sh --systemd | --desktop | --none
+# Set the method with a flag:   ./install.sh --systemd | --desktop | --none
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,10 +20,10 @@ case "${1:-}" in
   --desktop) MODE="desktop" ;;
   --none)    MODE="none" ;;
   "")        MODE="" ;;
-  *) echo "Неизвестный флаг: $1" >&2; echo "Использование: $0 [--systemd|--desktop|--none]" >&2; exit 2 ;;
+  *) echo "Unknown flag: $1" >&2; echo "Usage: $0 [--systemd|--desktop|--none]" >&2; exit 2 ;;
 esac
 
-echo "==> Установка в ${BIN}"
+echo "==> Installing to ${BIN}"
 mkdir -p "$BIN"
 for f in fifine-ptt fifine-ptt-selftest fifine-ptt-hardware-test mic-status fifine-setup.py; do
   if [ -f "${HERE}/${f}" ]; then
@@ -32,64 +32,64 @@ for f in fifine-ptt fifine-ptt-selftest fifine-ptt-hardware-test mic-status fifi
   fi
 done
 
-# ---------------------------------------------------------------- проверки
+# ---------------------------------------------------------------- checks
 echo
-echo "==> Проверка окружения"
+echo "==> Checking the environment"
 
 if id -nG | tr ' ' '\n' | grep -qx input; then
-  echo "    [ok] доступ к /dev/input (группа input)"
+  echo "    [ok] access to /dev/input (input group)"
   INPUT_OK=1
 else
   INPUT_OK=0
-  echo "    [!!] пользователь ${USER} НЕ входит в группу input"
-  echo "         Демон не сможет читать события. Выполните и перезайдите:"
+  echo "    [!!] user ${USER} is NOT a member of the input group"
+  echo "         The daemon cannot read input events. Run this, then log in again:"
   echo "             sudo usermod -aG input ${USER}"
-  echo "         Либо разово, без перелогина (сбросится при перезагрузке):"
+  echo "         Or grant temporary access without logging out (resets on reboot):"
   echo "             sudo setfacl -m u:${USER}:rw /dev/input/event*"
 fi
 
 if command -v pactl >/dev/null 2>&1 && pactl info >/dev/null 2>&1; then
-  echo "    [ok] звуковой сервер отвечает"
+  echo "    [ok] audio server is responding"
 else
-  echo "    [!!] pactl недоступен или звуковой сервер не отвечает"
-  echo "         Установите pipewire или pulseaudio-utils (см. README)"
+  echo "    [!!] pactl is unavailable or the audio server is not responding"
+  echo "         Install pipewire or pulseaudio-utils (see README)"
 fi
 
-# --------------------------------------------------------------- автозапуск
+# --------------------------------------------------------------- autostart
 echo
 if [ -z "$MODE" ]; then
-  # Автовыбор: systemd, если он есть как пользовательский менеджер.
+  # Auto-select systemd if a user-level manager is available.
   if systemctl --user show-environment >/dev/null 2>&1; then
     MODE="systemd"
   else
     MODE="desktop"
   fi
-  echo "==> Автозапуск: выбран способ '${MODE}' автоматически"
+  echo "==> Autostart: selected '${MODE}' automatically"
 fi
 
 case "$MODE" in
   systemd)
-    # Убираем .desktop-автозапуск, если он остался от прошлого запуска
-    # install.sh с --desktop: два канала = два демона на одной кнопке.
-    # Сам демон тоже защищён flock'ом, но чистка здесь избавляет от
-    # неочевидного «второй процесс молча выходит» в логах.
+    # Remove .desktop autostart if it was left by a previous installation.
+    # install.sh with --desktop: two launch mechanisms = two daemons on one button.
+    # The daemon is also protected by flock, but cleaning up here avoids the
+    # confusing log message that the second process exits silently.
     if [ -e "${AUTOSTART}/${NAME}.desktop" ]; then
       rm -f "${AUTOSTART}/${NAME}.desktop"
-      echo "    [i] удалён старый ${AUTOSTART}/${NAME}.desktop (иначе был бы двойной запуск)"
+      echo "    [i] removed old ${AUTOSTART}/${NAME}.desktop (would otherwise launch twice)"
     fi
     mkdir -p "$UNITDIR"
     install -Dm644 "${HERE}/${NAME}.service" "${UNITDIR}/${NAME}.service"
     systemctl --user daemon-reload
-    echo "    юнит: ${UNITDIR}/${NAME}.service"
-    echo "    включить:  systemctl --user enable --now ${NAME}"
-    echo "    статус:    systemctl --user status ${NAME}"
-    echo "    логи:      journalctl --user -u ${NAME} -f"
+    echo "    unit:      ${UNITDIR}/${NAME}.service"
+    echo "    enable:    systemctl --user enable --now ${NAME}"
+    echo "    status:    systemctl --user status ${NAME}"
+    echo "    logs:      journalctl --user -u ${NAME} -f"
     if [ "$INPUT_OK" -eq 1 ]; then
       systemctl --user enable --now "${NAME}.service" 2>/dev/null \
-        && echo "    [ok] запущен и добавлен в автозапуск" \
-        || echo "    [!!] не удалось запустить, включите вручную (команда выше)"
+        && echo "    [ok] started and enabled at login" \
+        || echo "    [!!] could not start; enable it manually (command above)"
     else
-      echo "    (запуск отложен: сначала выдайте доступ к /dev/input)"
+      echo "    (startup deferred: grant access to /dev/input first)"
     fi
     ;;
   desktop)
@@ -98,36 +98,36 @@ case "$MODE" in
 [Desktop Entry]
 Type=Application
 Name=Fifine push-to-talk
-Comment=Боковая кнопка мыши: hold-мьют. Кнопка микрофона: синхронизация состояния.
+Comment=Mouse side button: hold to mute. Microphone button: state synchronization.
 Exec=env FIFINE_TOUCH=1 ${BIN}/${NAME}
 Terminal=false
 NoDisplay=true
 X-GNOME-Autostart-enabled=true
 EOF
     echo "    ${AUTOSTART}/${NAME}.desktop"
-    echo "    Запустить сейчас: FIFINE_TOUCH=1 ${BIN}/${NAME} &"
+    echo "    Start now: FIFINE_TOUCH=1 ${BIN}/${NAME} &"
     echo
-    echo "    ВНИМАНИЕ: .desktop не перезапускает демон при падении."
-    echo "    Если нужна устойчивость — используйте systemd:"
+    echo "    NOTE: .desktop does not restart the daemon after a failure."
+    echo "    For better reliability, use systemd:"
     echo "        $0 --systemd"
     ;;
   none)
-    echo "==> Автозапуск не настраивался (--none)"
+    echo "==> Autostart was not configured (--none)"
     ;;
 esac
 
-# ---------------------------------------------------------------- итог
+# ---------------------------------------------------------------- summary
 echo
-echo "==> Проверка находки устройств"
+echo "==> Checking for detected devices"
 if [ "$INPUT_OK" -eq 1 ]; then
   "${BIN}/${NAME}" --status 2>&1 | sed 's/^/    /' || true
 else
-  echo "    пропущено (нет доступа к /dev/input)"
+  echo "    skipped (no access to /dev/input)"
 fi
 
 echo
-echo "==> Готово"
-echo "    Конфиг железа (если ещё не сделан): ${BIN}/fifine-setup.py"
-echo "    Проверка логики:                    ${BIN}/fifine-ptt-selftest"
-echo "    Проверка живого железа:             ${BIN}/fifine-ptt-hardware-test"
-echo "    Смотреть состояние:                 watch -n0.3 ${BIN}/mic-status"
+echo "==> Done"
+echo "    Hardware configuration (if not done yet): ${BIN}/fifine-setup.py"
+echo "    Logic test:                              ${BIN}/fifine-ptt-selftest"
+echo "    Hardware test:                           ${BIN}/fifine-ptt-hardware-test"
+echo "    Monitor status:                          watch -n0.3 ${BIN}/mic-status"

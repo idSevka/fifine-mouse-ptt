@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
-"""Push-to-talk / push-to-mute для микрофона Fifine по боковой кнопке мыши.
+"""Push-to-talk / push-to-mute for a Fifine microphone using a mouse side button.
 
-Логика (единственно правильная для hold-кнопки):
+Logic (the correct approach for a hold button):
 
-    press   -> запомнить ТЕКУЩЕЕ состояние микрофона, перевернуть его
-    release -> вернуть ровно то, что запомнили
+    press   -> save the CURRENT microphone state and toggle it
+    release -> restore exactly the saved state
 
-Отличие от прежней bash-версии в том, ГДЕ живёт состояние и ОТКУДА берутся
-события:
+Unlike the previous Bash version, state lives in a different place and events
+come from a different source:
 
-  * состояние хранится в памяти процесса, а не в файле — его невозможно
-    «затереть» лишним нажатием или потерять при пропущенном release;
-  * событие читается напрямую из evdev (BTN_EXTRA, код 276), а не через
-    биндинг Hyprland. Hyprland при удержании кнопки шлёт повторные press
-    с плавающими интервалами (у ресиверов бывает 0.2 / 0.4 / 1.8 с), и
-    старый скрипт с защитой по времени на 400 мс ловил их как новое
-    нажатие — отсюда «работает только в одном положении»;
-  * повторный BTN_EXTRA=1 при уже зажатой кнопке игнорируется по флагу,
-    без всяких таймеров и эвристик: пока не увидели value=0, состояние
-    не трогаем вообще.
+  * state is kept in process memory, not a file, so an extra press cannot
+    overwrite it and a missed release cannot lose it;
+  * events are read directly from evdev (BTN_EXTRA, code 276), not through a
+    Hyprland binding. While a button is held, Hyprland sends repeated presses
+    at varying intervals (some receivers produce 0.2 / 0.4 / 1.8 s), and the
+    old script's 400 ms time guard mistook them for new presses — hence “only
+    works in one position”;
+  * repeated BTN_EXTRA=1 events while the button is already held are ignored
+    using a flag, without timers or heuristics: the state is left untouched
+    until value=0 is received.
 
-Никаких файлов состояния, никаких таймеров — только флаг pressed.
+No state files or timers — only the pressed flag.
 """
 
 from __future__ import annotations
@@ -35,14 +35,14 @@ import sys
 import time
 
 
-# --------------------------------------------------------------- загрузка env
+# --------------------------------------------------------------- load env
 def _load_config() -> None:
-    """Читает ~/.config/fifine-ptt/env в окружение, не перетирая уже заданное.
+    """Load ~/.config/fifine-ptt/env into the environment without overwriting existing values.
 
-    Нужен для переносимости: на другой машине имена устройств и источник
-    другие, и вместо правки кода достаточно один раз прогнать fifine-setup.py,
-    который запишет этот файл. Переменные, заданные вручную в окружении, имеют
-    приоритет — так можно разово переопределить конфиг, ничего не редактируя.
+    This helps portability: device names and the audio source vary on other
+    machines. Instead of editing the code, run fifine-setup.py once to write
+    this file. Variables set manually in the environment take precedence, so
+    the configuration can be overridden for one run without editing anything.
     """
     path = os.path.expanduser("~/.config/fifine-ptt/env")
     try:
@@ -55,7 +55,7 @@ def _load_config() -> None:
                 key, value = key.strip(), value.strip().strip("'\"")
                 os.environ.setdefault(key, value)
     except OSError:
-        pass          # конфига нет — работаем на дефолтах
+        pass          # No config file; use the defaults.
 
 
 _load_config()
@@ -65,26 +65,26 @@ SOURCE = os.environ.get(
     "FIFINE_SOURCE",
     "alsa_input.usb-fifine_Microphones_fifine_Microphone_REV1.0-00.analog-stereo",
 )
-# Устройство ищем по имени, а не по номеру event-узла: номера меняются при
-# переподключении мыши, имена — нет.
+# Find the device by name rather than event-node number: numbers change when
+# the mouse is reconnected, but names do not.
 DEVICE_MATCH = os.environ.get("FIFINE_DEVICE_MATCH", "Beken USB Gaming Mouse")
 
-# BTN_EXTRA. Именно он приходит с боковой кнопки этой мыши (проверено
-# захватом evdev: BTN_EXTRA=1 / BTN_EXTRA=0, без автоповторов на уровне железа).
+# BTN_EXTRA is sent by this mouse's side button (verified with evdev capture:
+# BTN_EXTRA=1 / BTN_EXTRA=0, with no hardware-level autorepeats).
 BINDINGS = {
     int(os.environ.get("FIFINE_BTN", "276")): "hold",
 }
 
-# Сенсорная кнопка на корпусе микрофона: fifine Consumer Control, event7,
-# code 256. Отдельное устройство, отдельный код — поэтому и отдельная ветка.
+# Touch button on the microphone body: fifine Consumer Control, event7, code
+# 256. It is a separate device with a separate code, so it has its own handler.
 TOUCH_BUTTON = int(os.environ.get("FIFINE_TOUCH_BTN", "256"))
 TOUCH_DEVICE_MATCH = os.environ.get("FIFINE_TOUCH_DEVICE_MATCH", "fifine")
 
-# По умолчанию обработка сенсорной кнопки ВЫКЛЮЧЕНА. Причина: сенсорная кнопка
-# переключает гейт внутри чипа, а pactl — `Mic Capture Switch`, и это разные
-# гейты (измерено). Инвертирование системного на нажатие сенсорной может дать
-# совпадение, а может дать двойное переключение. Пока это не подтверждено на
-# живом Discord, поведение по умолчанию не меняем — включается явно:
+# Touch-button handling is DISABLED by default. The touch button toggles the
+# gate inside the chip, while pactl toggles `Mic Capture Switch`; these are
+# distinct gates (measured). Toggling the system gate on a touch press may
+# synchronize them or may toggle twice. Until confirmed in a live Discord
+# session, the default behavior remains unchanged; enable it explicitly:
 #   FIFINE_TOUCH=1 fifine-ptt
 TOUCH_BUTTON_ENABLED = bool(os.environ.get("FIFINE_TOUCH"))
 
@@ -99,23 +99,24 @@ def log(message: str) -> None:
         print(f"{time.strftime('%H:%M:%S')} {message}", file=sys.stderr, flush=True)
 
 
-# ------------------------------------------------------------------ pactl слой
+# ------------------------------------------------------------------ pactl layer
 def _pactl(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["pactl", *args], capture_output=True, text=True)
 
 
 def source_available() -> bool:
-    """Существует ли источник в звуковом сервере.
+    """Check whether the source exists in the audio server.
 
-    Без этой проверки неверное имя источника даёт худший из возможных
-    сценариев: is_muted() возвращает False (в выводе нет "Mute: yes"), демон
-    решает, что микрофон включён, set_muted() молча проваливается с ненулевым
-    кодом — и снаружи это выглядит как «кнопка не работает», без единой
-    подсказки о причине. На чужой машине это первое, обо что спотыкаешься.
+    Without this check, an incorrect source name causes the worst-case
+    scenario: is_muted() returns False (the output has no "Mute: yes"), the
+    daemon assumes the microphone is unmuted, and set_muted() silently fails
+    with a nonzero exit code. From the outside, this looks like “the button
+    does nothing,” with no explanation. This is the first issue likely to be
+    encountered on another machine.
 
-    Формат `pactl list sources short` — это индекс<TAB>имя<TAB>драйвер..., то
-    есть ИМЯ ВО ВТОРОМ ПОЛЕ. Первое поле — числовой индекс, и проверка по нему
-    всегда даёт False.
+    The `pactl list sources short` format is index<TAB>name<TAB>driver..., so
+    the NAME IS IN THE SECOND FIELD. The first field is a numeric index, and
+    checking it always returns False.
     """
     out = _pactl("list", "sources", "short")
     if out.returncode != 0:
@@ -128,7 +129,7 @@ def source_available() -> bool:
 
 
 def is_muted() -> bool:
-    """Читаем реальное состояние из PipeWire, а не из своей памяти."""
+    """Read the actual state from PipeWire rather than from local memory."""
     out = _pactl("get-source-mute", SOURCE)
     return "Mute: yes" in out.stdout
 
@@ -138,15 +139,15 @@ def set_muted(muted: bool) -> None:
 
 
 def notify(text: str, icon: str) -> None:
-    """OSD-подсказка. ОТКЛЮЧЕНА намеренно.
+    """OSD notification. DISABLED intentionally.
 
-    Раньше здесь был вызов omarchy-osd, и он же стал источником путаницы:
-    пользователь сверял состояние микрофона с этой надписью, а не с самим
-    устройством, и надпись воспринималась как "поведение кнопки поменялось".
-    OSD рисует то, что решил скрипт, а не то, что реально произошло с
-    железом — это лишний слой, который мешает диагностике.
+    This used to call omarchy-osd, which caused confusion: the user checked the
+    microphone state using this text instead of the device itself, and the
+    notification was interpreted as “the button behavior changed.” The OSD
+    displays what the script decided, not what actually happened in the
+    hardware — an extra layer that hinders diagnosis.
 
-    Включить обратно: export FIFINE_OSD=1
+    Re-enable with: export FIFINE_OSD=1
     """
     if not os.environ.get("FIFINE_OSD"):
         return
@@ -159,10 +160,10 @@ def notify(text: str, icon: str) -> None:
         pass
 
 
-# ------------------------------------------------------------------- evdev слой
+# ------------------------------------------------------------------- evdev layer
 def find_event_nodes(match: str) -> list[str]:
-    """Все /dev/input/eventN, в capabilities которых есть BTN_EXTRA и в имени
-    которых встречается match (регистронезависимо)."""
+    """Return all /dev/input/eventN nodes whose capabilities include BTN_EXTRA
+    and whose name contains match (case-insensitive)."""
     nodes = []
     for name in sorted(os.listdir("/dev/input")):
         if not name.startswith("event"):
@@ -185,11 +186,11 @@ def find_event_nodes(match: str) -> list[str]:
 
 
 def find_touch_nodes() -> list[str]:
-    """Устройства сенсорной кнопки микрофона: по имени и коду 256.
+    """Find microphone touch-button devices by name and code 256.
 
-    Это ДРУГОЕ физическое устройство — Consumer Control самого микрофона, а не
-    мышь. Код 256 (BTN_0 / KEY_BUTTONCONFIG) — единственный не-медийный в его
-    маске, поэтому он и однозначно опознаёт сенсорную кнопку.
+    This is a DIFFERENT physical device — the microphone's own Consumer
+    Control, not the mouse. Code 256 (BTN_0 / KEY_BUTTONCONFIG) is the only
+    non-media code in its mask, so it uniquely identifies the touch button.
     """
     nodes = []
     for name in sorted(os.listdir("/dev/input")):
@@ -208,7 +209,7 @@ def find_touch_nodes() -> list[str]:
 
 
 def _key_bit_set(caps: str, code: int) -> bool:
-    """Проверка бита в capabilities/key (набор 64-битных слов, little-endian)."""
+    """Check a bit in capabilities/key (a set of 64-bit little-endian words)."""
     words = caps.split()
     index, offset = divmod(code, 64)
     if index >= len(words):
@@ -223,12 +224,12 @@ def open_nodes(nodes: list[str]) -> dict[int, str]:
         try:
             fds[os.open(node, os.O_RDONLY | os.O_NONBLOCK)] = node
         except OSError as err:
-            log(f"не открыть {node}: {err}")
+            log(f"cannot open {node}: {err}")
     return fds
 
 
 def sync_nodes(fds: dict[int, str], nodes: list[str]) -> list[str]:
-    """Закрыть пропавшие узлы и открыть новые после USB hotplug."""
+    """Close missing nodes and open new ones after USB hotplug."""
     wanted = set(nodes)
     removed = []
     for fd, node in list(fds.items()):
@@ -239,14 +240,14 @@ def sync_nodes(fds: dict[int, str], nodes: list[str]) -> list[str]:
             except OSError:
                 pass
             removed.append(node)
-            log(f"устройство отключено: {node}")
+            log(f"device disconnected: {node}")
     current = set(fds.values())
     for node in nodes:
         if node not in current:
             opened = open_nodes([node])
             fds.update(opened)
             if opened:
-                log(f"устройство подключено: {node}")
+                log(f"device connected: {node}")
     return removed
 
 
@@ -257,123 +258,125 @@ def drop_fd(fds: dict[int, str], fd: int) -> None:
             os.close(fd)
         except OSError:
             pass
-        log(f"потеряно устройство: {node}")
+        log(f"device lost: {node}")
 
 
-# ------------------------------------------------------------------- основное
+# ------------------------------------------------------------------- main
 class HoldMic:
     def __init__(self) -> None:
-        self.pressed = False          # кнопка физически зажата (дебаунс от повторов)
-        self.saved_muted: bool | None = None   # что вернуть при отпускании
+        self.pressed = False          # Button is physically held (debounce repeated presses).
+        self.saved_muted: bool | None = None   # State to restore on release.
 
     def on_press(self) -> None:
         if self.pressed:
-            # Повторный press при уже зажатой кнопке. Hyprland такое шлёт, evdev
-            # на этой мыши — нет, но проверяем оба случая: молча игнорируем.
-            log("press (повтор, состояние не трогаю)")
+            # Repeated press while the button is already held. Hyprland sends
+            # these, evdev on this mouse does not; silently ignore either case.
+            log("press (repeat; state unchanged)")
             return
         self.pressed = True
         self.saved_muted = is_muted()
         set_muted(not self.saved_muted)
         now_muted = not self.saved_muted
-        log(f"press: было {'muted' if self.saved_muted else 'unmuted'} "
-            f"-> стало {'muted' if now_muted else 'unmuted'}")
-        # Одна всплывашка на НАЖАТИЕ, показывающая состояние ПОСЛЕ переключения.
-        # При отпускании не показываем ничего: удержание — это одно действие
-        # пользователя, и два сообщения на него читаются как два события.
-        notify("Микрофон выключен" if now_muted else "Микрофон включён",
+        log(f"press: was {'muted' if self.saved_muted else 'unmuted'} "
+            f"-> now {'muted' if now_muted else 'unmuted'}")
+        # Show one notification on PRESS with the state AFTER toggling.
+        # Show nothing on release: holding is one user action, and two
+        # notifications for it look like two separate events.
+        notify("Microphone muted" if now_muted else "Microphone unmuted",
                "microphone-muted" if now_muted else "microphone")
 
     def on_release(self) -> None:
         if not self.pressed or self.saved_muted is None:
-            log("release без press — игнорирую")
+            log("release without press — ignoring")
             return
         self.pressed = False
         restore = self.saved_muted
         self.saved_muted = None
         set_muted(restore)
-        log(f"release: вернул {'muted' if restore else 'unmuted'}")
-        # Никакого notify: состояние уже показано при нажатии, а удержание —
-        # одно действие пользователя. Второе сообщение читается как второе
-        # событие и путает ("почему при отпускании пишет, что включён?").
+        log(f"release: restored {'muted' if restore else 'unmuted'}")
+        # No notification: the state was already shown on press, and holding
+        # is one user action. A second notification looks like a second event
+        # and causes confusion (“why does it say unmuted on release?”).
 
     def on_device_lost(self) -> None:
-        """Восстановить исходный mute, если USB-мышь пропала при удержании."""
+        """Restore the original mute state if the USB mouse disconnects while held."""
         if self.pressed and self.saved_muted is not None:
             restore = self.saved_muted
             self.pressed = False
             self.saved_muted = None
             set_muted(restore)
-            log("мышь отключена: восстановил исходное состояние микрофона")
+            log("mouse disconnected: restored the original microphone state")
 
     def on_touch_button(self) -> None:
-        """Сенсорная кнопка на корпусе микрофона (event7, code 256).
+        """Touch button on the microphone body (event7, code 256).
 
-        Зачем это здесь. У микрофона ДВА независимых гейта мьюта:
+        Why this is here: the microphone has TWO independent mute gates:
 
-          * гейт внутри чипа — им управляет сенсорная кнопка, его видно по
-            лампочке на корпусе. В систему он НЕ транслируется: проверено
-            покадровым опросом pactl и amixer при шести нажатиях подряд —
-            состояние `Mic Capture Switch` не менялось ни разу.
-          * `Mic Capture Switch` в ALSA/PipeWire — им управляет pactl, и
-            именно его видит Discord/браузер как "слышно или нет".
+          * The gate inside the chip is controlled by the touch button and
+            indicated by the light on the body. It is NOT reported to the
+            system: frame-by-frame polling with pactl and amixer during six
+            consecutive presses confirmed that `Mic Capture Switch` never
+            changed.
+          * `Mic Capture Switch` in ALSA/PipeWire is controlled by pactl, and
+            Discord/the browser uses it to determine whether audio is heard.
 
-        Лампочка слушает ОБА гейта, система — только второй. Поэтому после
-        нажатия сенсорной кнопки лампочка и система расходятся, и демон, читая
-        состояние через pactl, принимал решения относительно НЕ того
-        положения, которое показывал индикатор. Это и был источник симптома
-        "правильно работает только в одном положении".
+        The light reflects BOTH gates; the system reflects only the second.
+        After a touch-button press, the light and system can therefore disagree,
+        and the daemon, reading state through pactl, made decisions based on a
+        state DIFFERENT from the one shown by the indicator. This caused the
+        “only works in one position” symptom.
 
-        Здесь мы догоняем: раз сенсорную кнопку нажали, физический гейт
-        перевернулся — переворачиваем и системный, чтобы оба совпали.
+        This handler keeps them in sync: when the touch button is pressed, the
+        physical gate toggles, so we also toggle the system gate.
 
-        Включается переменной FIFINE_TOUCH=1 (по умолчанию ВЫКЛЮЧЕНО:
-        механика с двумя гейтами проверена не до конца, см. --status).
+        Enable with FIFINE_TOUCH=1 (DISABLED by default: the behavior of the
+        two gates has not been fully verified; see --status).
         """
         if not TOUCH_BUTTON_ENABLED:
             return
         if self.pressed:
-            # Сенсорная кнопка во время удержания мышиной: исходное состояние
-            # уже запомнено, инвертировать нельзя — release вернёт не то.
-            log("сенсорная кнопка во время удержания — игнорирую")
+            # Touch button pressed while the mouse button is held: the original
+            # state is already saved, so toggling it would make release restore
+            # the wrong state.
+            log("touch button pressed while held — ignoring")
             return
         before = is_muted()
         set_muted(not before)
         now_muted = not before
-        log(f"сенсорная кнопка: было {'muted' if before else 'unmuted'} "
-            f"-> стало {'muted' if now_muted else 'unmuted'}")
-        # Одна всплывашка на нажатие — как и у мышиной кнопки.
-        notify("Микрофон выключен" if now_muted else "Микрофон включён",
+        log(f"touch button: was {'muted' if before else 'unmuted'} "
+            f"-> now {'muted' if now_muted else 'unmuted'}")
+        # Show one notification per press, just like the mouse button.
+        notify("Microphone muted" if now_muted else "Microphone unmuted",
                "microphone-muted" if now_muted else "microphone")
 
 
 def run_daemon() -> int:
     mic = HoldMic()
 
-    # Проверяем звуковой сервер ДО того, как уйти в цикл: иначе неверный
-    # источник даёт «кнопка нажимается, но ничего не происходит» без объяснений.
+    # Check the audio server BEFORE entering the loop; otherwise a wrong source
+    # makes the button appear to do nothing, without any explanation.
     if not source_available():
-        print(f"Источник '{SOURCE}' не найден в звуковом сервере.\n"
-              f"Посмотреть доступные:\n"
+        print(f"Source '{SOURCE}' was not found in the audio server.\n"
+              f"List available sources with:\n"
               f"    pactl list sources short\n"
-              f"и задать свой:\n"
-              f"    FIFINE_SOURCE=<имя> fifine-ptt",
+              f"and set a custom source with:\n"
+              f"    FIFINE_SOURCE=<name> fifine-ptt",
               file=sys.stderr)
         return 1
 
-    # Устройства перепоискаются: eventN меняется после USB hotplug.
+    # Devices are rescanned because eventN changes after USB hotplug.
     fds = open_nodes(find_event_nodes(DEVICE_MATCH))
     touch_fds: dict[int, str] = {}
     if TOUCH_BUTTON_ENABLED:
         touch_fds = open_nodes(find_touch_nodes())
         if not touch_fds:
-            log("сенсорная кнопка включена, но устройство микрофона не найдено")
+            log("touch button is enabled, but the microphone device was not found")
 
     watch = {**fds, **touch_fds}
     for node in watch.values():
-        log(f"слушаю {node}")
+        log(f"listening to {node}")
     if not fds:
-        log("мышь пока не найдена; жду подключения")
+        log("mouse not found yet; waiting for it to connect")
     scan_interval = 1.0
     last_scan = 0.0
 
@@ -392,7 +395,7 @@ def run_daemon() -> int:
             try:
                 ready, _, _ = select.select(list(watch), [], [], scan_interval)
             except (OSError, ValueError) as err:
-                log(f"ошибка select: {err}; перепоискаю устройства")
+                log(f"select error: {err}; rescanning devices")
                 for fd in list(fds):
                     drop_fd(fds, fd)
                 for fd in list(touch_fds):
@@ -408,7 +411,7 @@ def run_daemon() -> int:
                 try:
                     data = os.read(fd, 4096)
                 except OSError as err:
-                    log(f"ошибка чтения {source_fds.get(fd, fd)}: {err}")
+                    log(f"read error for {source_fds.get(fd, fd)}: {err}")
                     drop_fd(source_fds, fd)
                     if source_fds is fds:
                         mic.on_device_lost()
@@ -428,7 +431,7 @@ def run_daemon() -> int:
                         continue
 
                     if is_touch:
-                        # Сенсорная кнопка: событие по фронту нажатия.
+                        # Touch button: handle the press edge.
                         if code == TOUCH_BUTTON and value == 1:
                             mic.on_touch_button()
                         continue
@@ -439,13 +442,13 @@ def run_daemon() -> int:
                         mic.on_press()
                     elif value == 0:
                         mic.on_release()
-                    # value == 2 — автоповтор на уровне ядра, намеренно молчим.
+                    # value == 2 is a kernel-level autorepeat; intentionally ignore it.
     except KeyboardInterrupt:
-        # Если погасили демон при зажатой кнопке — вернём исходное состояние,
-        # иначе микрофон останется перевёрнутым.
+        # If the daemon is stopped while the button is held, restore the
+        # original state; otherwise the microphone will remain toggled.
         if mic.pressed and mic.saved_muted is not None:
             set_muted(mic.saved_muted)
-            log("остановлен: восстановил состояние")
+            log("stopped: restored the original state")
         return 0
     finally:
         for fd in {**fds, **touch_fds}:
@@ -456,33 +459,33 @@ def run_daemon() -> int:
 
 
 def acquire_singleton_lock() -> "IO[str] | None":
-    """Взять эксклюзивную блокировку, чтобы демон не поднялся вторым инстансом.
+    """Acquire an exclusive lock to prevent a second daemon instance from starting.
 
-    Возвращает открытый файл блокировки (держать до выхода из процесса) или
-    None, если другой экземпляр уже работает.
+    Return the open lock file (keep it open until the process exits), or None
+    if another instance is already running.
 
-    Зачем: у демона два независимых канала автозапуска в прошлом (systemd --user
-    и ~/.config/autostart), и случайное возвращение второго приводило к двум
-    процессам, читающим одну и ту же кнопку мыши. Оба видели press, оба
-    переворачивали микрофон -- и при отпускании возвращали состояние дважды,
-    то есть в исходное, а снаружи выглядело как «кнопка не работает».
+    Why: the daemon previously had two independent autostart mechanisms
+    (systemd --user and ~/.config/autostart). Accidentally restoring the second
+    one resulted in two processes reading the same mouse button. Both saw the
+    press and toggled the microphone; on release both restored the state, so it
+    returned to its original value and appeared as if “the button did nothing.”
 
-    flock (а не файл с pid) выбран сознательно: ядро снимает блокировку само при
-    завершении процесса, поэтому убитый `kill -9` демон не оставляет после себя
-    «залипший» замок, из-за которого следующий запуск отказывался бы стартовать.
+    flock (rather than a PID file) is intentional: the kernel releases the lock
+    when the process exits, so even a daemon killed with `kill -9` does not
+    leave a stale lock that would prevent the next launch.
     """
     path = os.path.expanduser("~/.run/fifine-ptt.lock")
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         lock = open(path, "w")
     except OSError:
-        return None          # не можем создать файл -- не наша проблема, работаем
+        return None          # Cannot create the file; proceed without the lock.
 
     try:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         lock.close()
-        return False         # замок занят другим живым экземпляром
+        return False         # The lock is held by another running instance.
 
     lock.write(f"{os.getpid()}\n")
     lock.flush()
@@ -492,27 +495,28 @@ def acquire_singleton_lock() -> "IO[str] | None":
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--status", action="store_true",
-                        help="показать состояние микрофона и выйти")
+                        help="show the microphone state and exit")
     parser.add_argument("--once", action="store_true",
-                        help="не демон, а один цикл чтения (для тестов)")
+                        help="run one read cycle instead of the daemon (for tests)")
     args = parser.parse_args()
 
     if args.status:
         print(f"{SOURCE}: {'muted' if is_muted() else 'unmuted'}")
-        print(f"мышь:      {find_event_nodes(DEVICE_MATCH) or 'не найдены'}")
-        print(f"сенсорная: {find_touch_nodes() or 'не найдена'}"
-              f"  (обработка: {'ВКЛ' if TOUCH_BUTTON_ENABLED else 'выкл'})")
+        print(f"mouse:      {find_event_nodes(DEVICE_MATCH) or 'not found'}")
+        print(f"touch:      {find_touch_nodes() or 'not found'}"
+              f"  (handling: {'ON' if TOUCH_BUTTON_ENABLED else 'off'})")
         return 0
 
-    # --status только читает состояние и выходит, замок ему не нужен.
+    # --status only reads the state and exits; it does not need the lock.
     lock = acquire_singleton_lock()
     if lock is False:
-        # Печатаем БЕЗУСЛОВНО, не через log(): log() молчит без FIFINE_DEBUG,
-        # а именно этот выход нужно видеть всегда. Иначе второй инстанс тихо
-        # исчезает, и «почему не работает после добавления второго автозапуска»
-        # остаётся без единой подсказки в журнале systemd.
-        print("fifine-ptt уже запущен другим экземпляром — выходим "
-              "(защита от двойного автозапуска)", file=sys.stderr, flush=True)
+        # Always print this directly rather than through log(): log() is silent
+        # without FIFINE_DEBUG, but this exit must always be visible. Otherwise,
+        # the second instance disappears silently, leaving no clue in the
+        # systemd journal about why the daemon stopped working after a second
+        # autostart entry was added.
+        print("fifine-ptt is already running in another instance; exiting "
+              "(duplicate autostart protection)", file=sys.stderr, flush=True)
         return 0
 
     return run_daemon()

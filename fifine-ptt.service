@@ -1,24 +1,24 @@
 [Unit]
 Description=Push-to-talk / push-to-mute for a USB microphone via mouse side button
 Documentation=https://github.com/idSevka/fifine-mouse-ptt
-# Демон управляет микрофоном через pactl, поэтому звуковой сервер должен быть
-# готов. Wants вместо Requires: если PipeWire перезапустится, юнит не умрёт.
+# The daemon controls the microphone through pactl, so the audio server must be
+# ready. Wants instead of Requires: the unit will survive a PipeWire restart.
 After=pipewire.service pipewire-pulse.service
 Wants=pipewire.service pipewire-pulse.service
 
 [Service]
 Type=simple
 ExecStart=%h/.local/bin/fifine-ptt
-# FIFINE_TOUCH=1 включает синхронизацию с кнопкой на корпусе микрофона.
-# Уберите, если нужна только боковая кнопка мыши.
+# FIFINE_TOUCH=1 enables synchronization with the button on the microphone body.
+# Remove this if you only want the mouse side button.
 Environment=FIFINE_TOUCH=1
-# НЕ добавляйте сюда SupplementaryGroups=input: пользовательские юниты systemd
-# не могут менять группы (падает с "Changing group credentials failed:
-# Operation not permitted", status=216/GROUP). Группа input должна быть у самого
-# пользователя — sudo usermod -aG input $USER, затем перелогин. После этого она
-# наследуется всеми его процессами, включая этот сервис.
+# Do NOT add SupplementaryGroups=input here: systemd user units cannot change
+# groups (fails with "Changing group credentials failed: Operation not permitted",
+# status=216/GROUP). The user must belong to the input group — run
+# sudo usermod -aG input $USER, then log in again. The group is then inherited
+# by all of the user's processes, including this service.
 #
-# Проверить: id -nG | tr ' ' '\n' | grep -x input
+# Check with: id -nG | tr ' ' '\n' | grep -x input
 Restart=on-failure
 RestartSec=3
 

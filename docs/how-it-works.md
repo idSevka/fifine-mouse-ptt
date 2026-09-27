@@ -1,201 +1,203 @@
-# Как это работает и почему так сделано
+# How It Works and Why It Is Done This Way
 
-Документ описывает реальные измерения, а не предположения. Всё ниже проверено
-на конкретном железе и в конкретных условиях, они указаны в конце.
+This document describes actual measurements, not assumptions. Everything below was
+verified on specific hardware and under specific conditions, listed at the end.
 
 ---
 
-## Проблема 1: файл состояния + таймер не работают
+## Problem 1: A state file + timer do not work
 
-Классический скрипт для hold-кнопки выглядит так:
+A classic script for a hold button looks like this:
 
 ```bash
 press)
-    # если state-файл есть, значит кнопка уже зажата — пропускаем повтор
+    # if the state file exists, the button is already held — skip the repeat
     [ -f "$STATE" ] && exit 0
-    # но раньше это сочеталось ещё и с проверкой по времени:
-    # «если файл младше 400 мс — считаем повтором»
-    pactl get-source-mute ... > /tmp/state     # запомнили, как было
-    pactl set-source-mute ... toggle           # перевернули
+    # but previously this was also combined with a time check:
+    # “if the file is younger than 400 ms, treat it as a repeat”
+    pactl get-source-mute ... > /tmp/state     # remember the previous state
+    pactl set-source-mute ... toggle           # toggle it
     ;;
 release)
-    pactl set-source-mute ... $(cat /tmp/state)  # вернули как было
+    pactl set-source-mute ... $(cat /tmp/state)  # restore the previous state
     rm -f /tmp/state
     ;;
 ```
 
-Тут два дефекта, и они складываются:
+There are two defects here, and they compound:
 
-1. **Проверка по времени.** Повторы Hyprland приходят с плавающими интервалами.
-2. **`rm -f "$STATE"` на медленном пути.** Если повтор всё же прошёл проверку,
-   файл удаляется и нажатие обрабатывается как новое — запомненное состояние
-   перезаписывается.
+1. **Time-based check.** Hyprland repeats arrive at variable intervals.
+2. **`rm -f "$STATE"` on the slow path.** If a repeat does pass the check,
+   the file is deleted and the press is handled as a new one — the saved state
+   gets overwritten.
 
-Воспроизведение (press → повтор через 0.6 с → release):
+Reproduction (press → repeat after 0.6 s → release):
 
 ```
-старт:     unmuted
-press1 ->  muted    state=unmuted    <- верно
-press2 ->  unmuted  state=muted      <- состояние перезаписано
-release -> muted                     <- вернулось НЕ туда
+start:     unmuted
+press1 ->  muted    state=unmuted    <- correct
+press2 ->  unmuted  state=muted      <- state overwritten
+release -> muted                     <- restored to the WRONG state
 ```
 
-Замеренные интервалы между повторами на одном беспроводном ресивере:
-**0.2, 0.4, 0.6 и 1.8 секунды**. Фиксированный порог тут не подобрать: 1.8 с
-промахивается мимо окна 400 мс, а окно в 2 секунды проглотит честный быстрый
-двойной клик. **Правильное решение — убрать таймер, а не подбирать значение.**
+Measured intervals between repeats on one wireless receiver:
+**0.2, 0.4, 0.6, and 1.8 seconds**. No fixed threshold works here: 1.8 s
+misses the 400 ms window, while a 2-second window will swallow a genuine fast
+double-click. **The correct solution is to remove the timer, not tune its value.**
 
-Демон делает так:
+The daemon does this:
 
 ```python
 def on_press(self):
-    if self.pressed:          # уже зажата → повтор → НЕ ТРОГАЕМ ничего
+    if self.pressed:          # already held → repeat → DO NOT touch anything
         return
     self.pressed = True
-    self.saved = is_muted()   # читаем реальное состояние, ровно один раз
+    self.saved = is_muted()   # read the actual state exactly once
     set_muted(not self.saved)
 
 def on_release(self):
     if not self.pressed or self.saved is None:
-        return                # отпускание без нажатия → игнорируем
+        return                # release without a press → ignore
     self.pressed = False
     restore, self.saved = self.saved, None
     set_muted(restore)
 ```
 
-Ключевое: состояние живёт в памяти процесса и захватывается **один раз** при
-нажатии. Никакое количество лишних событий его не испортит.
+The key point: the state lives in the process's memory and is captured **once**
+on press. No number of extra events can corrupt it.
 
 ---
 
-## Проблема 2: два независимых гейта мьюта
+## Problem 2: Two independent mute gates
 
-Вот это — самое неочевидное, и именно тут был корень длительной путаницы.
+This is the least obvious part, and it was the root cause of the prolonged
+confusion.
 
-У Fifine USB Microphone оказалось **два** независимых способа заглушить звук:
+The Fifine USB Microphone turned out to have **two** independent ways to mute
+audio:
 
-| | аппаратный гейт | программный гейт |
+| | Hardware gate | Software gate |
 |---|---|---|
-| чем управляется | сенсорная кнопка на корпусе | `pactl set-source-mute` |
-| где видно | светодиод на корпусе | `Mic Capture Switch` (ALSA/PipeWire) |
-| видит ли ОС | **нет** | да |
-| влияет на приложения | косвенно | **да, напрямую** |
+| controlled by | touch button on the body | `pactl set-source-mute` |
+| visible as | LED on the body | `Mic Capture Switch` (ALSA/PipeWire) |
+| visible to the OS | **no** | yes |
+| affects applications | indirectly | **yes, directly** |
 
-Измерения, доказывающие, что это разные вещи:
+Measurements proving these are different things:
 
-**Шесть нажатий сенсорной кнопки подряд** при покадровом опросе каждые 200 мс:
+**Six consecutive presses of the touch button** while polling every 200 ms:
 
 ```
-старт:                        PipeWire=LIVE  чип=on
+start:                        PipeWire=LIVE  chip=on
 15:48:11  FIFINE_KEY 256 value=1 / value=0
 15:48:14  FIFINE_KEY 256 value=1 / value=0
 15:48:35  FIFINE_KEY 256 value=1 / value=0
 15:48:43  FIFINE_KEY 256 value=1 / value=0
 15:48:53  FIFINE_KEY 256 value=1 / value=0
 15:48:55  FIFINE_KEY 256 value=1 / value=0
-конец:                        PipeWire=LIVE  чип=on    <- НИ ОДНОГО изменения
+end:                          PipeWire=LIVE  chip=on    <- NOT A SINGLE CHANGE
 ```
 
-Светодиод при этом исправно переключался, и в Discord менялась слышимость.
-Но ни `pactl`, ни `amixer` не зафиксировали ни одного изменения. Также был снят
-полный дамп всех восьми регистров карты через `amixer -c 3 contents` — ни один
-не менялся.
+The LED switched correctly, and audibility changed in Discord.
+But neither `pactl` nor `amixer` recorded a single change. A full dump of all
+eight card registers was also captured with `amixer -c 3 contents` — none
+changed.
 
-**Вывод:** событие кнопки — читаемое, состояние гейта — нет. Это **разные
-каналы**, и отрицательный результат на одном ничего не говорит о другом. Эта
-ошибка (обобщить «состояние не читается» на «кнопка не подключена ни к чему
-читаемому») стоила лишнего круга диагностики.
+**Conclusion:** the button event is readable; the gate state is not. These are
+**different channels**, and a negative result on one says nothing about the
+other. This mistake (generalizing “the state cannot be read” to “the button is
+not connected to anything readable”) cost an extra round of diagnostics.
 
-Светодиод при этом слушает **оба** гейта: если нажать боковую кнопку мыши, он
-реагирует. То есть индикатор знает больше, чем система.
+The LED listens to **both** gates: if you press the mouse side button, it
+reacts. In other words, the indicator knows more than the system does.
 
-### Как это лечится
+### How this is fixed
 
-Раз событие сенсорной кнопки читается — демон слушает и её, и приводит
-программный гейт в соответствие:
+Since the touch-button event is readable, the daemon listens for it and brings
+the software gate into sync:
 
 ```
-сенсорная кнопка нажата (code 256)
+touch button pressed (code 256)
     │
-    ├─ демон видит событие
-    ├─ читает текущее состояние через pactl
-    └─ инвертирует его в системе → система догоняет светодиод
+    ├─ daemon sees the event
+    ├─ reads the current state using pactl
+    └─ inverts it in the system → the system catches up with the LED
 ```
 
-Важная защита: если сенсорную кнопку нажать **во время удержания** мышиной —
-игнорируем. Иначе исходное состояние уже захвачено, инверсия его испортит, и
-`release` вернёт не то значение. Это ровно тот же баг, от которого мы уходили,
-только через новую дверь.
+Important safeguard: if the touch button is pressed **while the mouse button
+is being held** — ignore it. Otherwise, the original state has already been
+captured, the inversion will corrupt it, and `release` will restore the wrong
+value. This is exactly the same bug we were trying to eliminate, just through a
+new door.
 
 ---
 
-## Как найти коды на своём железе
+## How to find the codes on your hardware
 
-Слушайте все устройства сразу, пока физически жмёте кнопки:
+Listen to all devices at once while physically pressing the buttons:
 
 ```bash
 python3 scripts/mouse-hid-sniff.py 120 ~/capture.jsonl
 ```
 
-Скрипт откроет все читаемые `/dev/input/event*` и все доступные `/dev/hidraw*`,
-запишет JSONL с метками времени и напечатает сводку по кнопкам. Два подводных
-камня, которые он уже обходит:
+The script opens all readable `/dev/input/event*` and all available
+`/dev/hidraw*`, writes JSONL with timestamps, and prints a summary of the
+buttons. It already handles two pitfalls:
 
-- **`/dev/hidraw*` — это `0600 root:root`**, в отличие от `/dev/input/*`
-  (`root:input 0660`). Пользователь в группе `input` читает evdev, но не hidraw.
-  Это важно: некоторые вендорские кнопки репортятся **только** через HID и в
-  evdev не появляются вообще.
-- **Чтение может вернуть неполный `struct input_event`.** Разбор такого хвоста
-  по 16-байтной границе падает с `struct.error`. Нужно выйти из цикла, а не
-  распаковывать.
+- **`/dev/hidraw*` is `0600 root:root`**, unlike `/dev/input/*`
+  (`root:input 0660`). A user in the `input` group can read evdev, but not
+  hidraw. This matters: some vendor buttons are reported **only** through HID
+  and do not appear in evdev at all.
+- **A read can return an incomplete `struct input_event`.** Parsing such a
+  trailing fragment on a 16-byte boundary fails with `struct.error`. Exit the
+  loop instead of unpacking it.
 
-Проверка, что перед вами действительно мышь:
+Check that the device is actually a mouse:
 
 ```bash
-cat /sys/class/input/eventN/device/capabilities/key    # ждём биты 272..276
-cat /sys/class/input/eventN/device/capabilities/rel    # у мыши не 0
+cat /sys/class/input/eventN/device/capabilities/key    # expect bits 272..276
+cat /sys/class/input/eventN/device/capabilities/rel    # non-zero for a mouse
 ```
 
-Пятикнопочная мышь показывает `1f0000 0 0 0 0` — это
-`BTN_LEFT/RIGHT/MIDDLE/SIDE/EXTRA` = коды 272–276.
+A five-button mouse shows `1f0000 0 0 0 0` — this is
+`BTN_LEFT/RIGHT/MIDDLE/SIDE/EXTRA` = codes 272–276.
 
-**Не привязывайтесь к `eventN`.** Номера меняются при переподключении и
-перезагрузке: один и тот же ресивер был клавиатурой на `event8` в одной сессии
-и мышью на `event13` в следующей. Матчите по имени устройства и по наличию кода
-в `capabilities/key`.
+**Do not bind to `eventN`.** Numbers change on reconnect and reboot: the same
+receiver was a keyboard at `event8` in one session and a mouse at `event13` in
+the next. Match by device name and by the presence of the code in
+`capabilities/key`.
 
 ---
 
-## Проверка, что всё работает
+## Verify that everything works
 
-Симуляция логики (не требует железа):
+Logic simulation (does not require hardware):
 
 ```bash
 fifine-ptt-selftest
 ```
 
-Покрывает обе полярности × {0, 1, 5} лишних нажатий и проверяет, что итоговое
-состояние равно исходному. 6 сценариев.
+Covers both polarities × {0, 1, 5} extra presses and checks that the final state
+equals the initial state. 6 scenarios.
 
-> **Зелёный самотест доказывает логику, а не то, что кнопка работает.** Он
-> вызывает ваши же методы с вашей же последовательностью событий и не может
-> упасть по причине, лежащей ниже вашего кода. Не считайте его подтверждением
-> исправления.
+> **A green self-test proves the logic, not that the button works.** It calls
+> your own methods with your own event sequence and cannot fail for a reason
+> below your code. Do not treat it as confirmation of the fix.
 
-Проверка на живом железе:
+Test on live hardware:
 
 ```bash
-watch -n0.3 mic-status       # и жмите кнопку
+watch -n0.3 mic-status       # and press the button
 ```
 
 ---
 
-## Условия измерений
+## Measurement conditions
 
 - Arch Linux, Hyprland 0.56 (Omarchy 4.0.4)
-- Микрофон: Fifine USB Microphone (`3142:00a8`), карта ALSA 3
-- Мышь: Beken USB Gaming Mouse (`1d57:fa61`), боковая кнопка = `BTN_EXTRA` (276)
-- Сенсорная кнопка микрофона: отдельное устройство Consumer Control, `code 256`
-  (в маске коды `113,114,115,163,164,165,166,256`)
+- Microphone: Fifine USB Microphone (`3142:00a8`), ALSA card 3
+- Mouse: Beken USB Gaming Mouse (`1d57:fa61`), side button = `BTN_EXTRA` (276)
+- Microphone touch button: separate Consumer Control device, `code 256`
+  (in the mask: codes `113,114,115,163,164,165,166,256`)
 
-На другом железе коды и имена будут иные — но подход остаётся тем же.
+Codes and names will differ on other hardware, but the approach remains the same.

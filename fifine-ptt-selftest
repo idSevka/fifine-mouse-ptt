@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Тест логики fifine-ptt: прогоняет сценарии, которые ломали старый bash-скрипт.
+"""Test fifine-ptt logic by running scenarios that broke the old Bash script.
 
-Запуск: python3 ~/.local/bin/fifine-ptt-selftest
-Ничего не устанавливает, только дёргает HoldMic и проверяет итоговое mute-состояние.
+Run with: python3 ~/.local/bin/fifine-ptt-selftest
+Installs nothing; it only exercises HoldMic and checks the final mute state.
 """
 import importlib.machinery
 import importlib.util
@@ -39,9 +39,9 @@ def run_scenario(name, start_muted, presses, expect_muted):
     trace = []
     mic.on_press()
     trace.append(f"press -> {mute_state(m.SOURCE)}")
-    for _ in range(presses):                 # лишние press = автоповторы
+    for _ in range(presses):                 # Extra presses represent autorepeats.
         mic.on_press()
-        trace.append(f"повтор -> {mute_state(m.SOURCE)}")
+        trace.append(f"repeat -> {mute_state(m.SOURCE)}")
     mic.on_release()
     trace.append(f"release -> {mute_state(m.SOURCE)}")
 
@@ -49,8 +49,8 @@ def run_scenario(name, start_muted, presses, expect_muted):
     ok = final == expect_muted
     verdict = "OK  " if ok else "FAIL"
     print(f"[{verdict}] {name}")
-    print(f"        старт={'muted' if start_muted else 'unmuted'}, "
-          f"лишних press={presses}, ожидали вернуться в "
+    print(f"        start={'muted' if start_muted else 'unmuted'}, "
+          f"extra presses={presses}, expected to return to "
           f"{'muted' if expect_muted else 'unmuted'}")
     for line in trace:
         print(f"          {line}")
@@ -59,18 +59,18 @@ def run_scenario(name, start_muted, presses, expect_muted):
 
 def main():
     results = [
-        # обычное удержание: микрофон ВКЛ -> на время удержания ВЫКЛ -> обратно ВКЛ
-        run_scenario("push-to-mute, без повторов", False, 0, "no"),
-        # микрофон ВЫКЛ -> на время удержания ВКЛ -> обратно ВЫКЛ
-        run_scenario("push-to-talk, без повторов", True, 0, "yes"),
-        # и то, что раньше ломалось: лишние press при зажатой кнопке
-        run_scenario("push-to-mute + 1 автоповтор", False, 1, "no"),
-        run_scenario("push-to-mute + 5 автоповторов", False, 5, "no"),
-        run_scenario("push-to-talk + 1 автоповтор", True, 1, "yes"),
-        run_scenario("push-to-talk + 5 автоповторов", True, 5, "yes"),
+        # Normal hold: mic ON -> OFF while held -> back ON.
+        run_scenario("push-to-mute, no repeats", False, 0, "no"),
+        # Mic OFF -> ON while held -> back OFF.
+        run_scenario("push-to-talk, no repeats", True, 0, "yes"),
+        # The formerly broken case: extra presses while the button is held.
+        run_scenario("push-to-mute + 1 autorepeat", False, 1, "no"),
+        run_scenario("push-to-mute + 5 autorepeats", False, 5, "no"),
+        run_scenario("push-to-talk + 1 autorepeat", True, 1, "yes"),
+        run_scenario("push-to-talk + 5 autorepeats", True, 5, "yes"),
     ]
     print()
-    print(f"итог: {sum(results)}/{len(results)} сценариев прошли")
+    print(f"result: {sum(results)}/{len(results)} scenarios passed")
     return 0 if all(results) else 1
 
 

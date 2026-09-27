@@ -3,7 +3,7 @@
 Push-to-talk / push-to-mute for a USB microphone from a mouse side button — plus
 sync with the microphone's own mute button.
 
-[Русская версия](README.ru.md)
+This project is maintained in English.
 
 Built and verified on a Fifine USB Microphone under Arch + Hyprland, but the
 approach applies to any device that emits a readable evdev event.
@@ -143,7 +143,7 @@ takes an exclusive `flock` on `~/.run/fifine-ptt.lock`; the second instance
 exits immediately with status 0 and prints why:
 
 ```
-fifine-ptt уже запущен другим экземпляром — выходим (защита от двойного автозапуска)
+fifine-ptt is already running in another instance — exiting (duplicate-start protection)
 ```
 
 This matters because two daemons read the same button: both see `press`, both
@@ -303,8 +303,8 @@ fifine-setup.py --config-only   # print the current config
 disagreement between them:
 
 ```
-16:35:11       PipeWire:    ВКЛЮЧЁН (live)   [no]
-               ALSA (чип): ВКЛЮЧЁН (live)   [on]  (карта 3)
+16:35:11       PipeWire:    ENABLED (live)   [no]
+               ALSA (chip): ENABLED (live)   [on]  (card 3)
 ```
 
 `fifine-ptt-hardware-test` answers a different question: does the physical button

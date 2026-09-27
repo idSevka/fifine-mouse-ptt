@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Автопоиск железа и генерация конфига для fifine-ptt.
+"""Automatically detect hardware and generate a config for fifine-ptt.
 
-Запусти один раз на новой машине: скрипт спросит, какую кнопку нажимать,
-поймает событие, найдёт микрофон и запишет ~/.config/fifine-ptt/env.
+Run once on a new machine: the script will ask which button to press,
+capture the event, find the microphone, and write ~/.config/fifine-ptt/env.
 
     python3 fifine-setup.py
 
-Это избавляет от ручного выяснения имён устройств и кодов кнопок —
-главного препятствия при переносе на другую систему.
+This avoids manually figuring out device names and button codes —
+the main obstacle when moving to another system.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ EV_SIZE = struct.calcsize("llHHi")
 CONFIG_DIR = os.path.expanduser("~/.config/fifine-ptt")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "env")
 
-PICK_SOURCE = False   # --pick: спрашивать микрофон даже если есть по умолчанию
+PICK_SOURCE = False   # --pick: ask for a microphone even if a default exists
 
 
 def say(msg: str = "") -> None:
@@ -50,58 +50,58 @@ def list_event_nodes() -> list[str]:
 
 def check_prerequisites() -> bool:
     ok = True
-    say("== Проверка окружения")
-    for tool, why in (("pactl", "управление микрофоном (PipeWire/PulseAudio)"),
-                      ("python3", "сам демон")):
+    say("== Checking the environment")
+    for tool, why in (("pactl", "microphone control (PipeWire/PulseAudio)"),
+                      ("python3", "the daemon itself")):
         if shutil.which(tool):
             say(f"   [ok] {tool}")
         else:
-            say(f"   [!!] {tool} не найден — нужен для: {why}")
+            say(f"   [!!] {tool} not found — required for: {why}")
             ok = False
 
     groups = subprocess.run(["id", "-nG"], capture_output=True, text=True).stdout.split()
     if "input" in groups:
-        say("   [ok] пользователь в группе input (доступ к /dev/input)")
+        say("   [ok] user is in the input group (access to /dev/input)")
     else:
-        say("   [!!] пользователь НЕ в группе input")
-        say(f"        выполни: sudo usermod -aG input {os.environ.get('USER', '$USER')}")
-        say("        затем перезайди в систему")
+        say("   [!!] user is NOT in the input group")
+        say(f"        run: sudo usermod -aG input {os.environ.get('USER', '$USER')}")
+        say("        then log back into the system")
         ok = False
 
-    # Звуковой сервер отвечает?
+    # Is the sound server responding?
     r = subprocess.run(["pactl", "info"], capture_output=True, text=True)
     if r.returncode == 0:
-        say("   [ok] звуковой сервер отвечает")
+        say("   [ok] sound server is responding")
     else:
-        say("   [!!] pactl не может связаться со звуковым сервером")
-        say("        PipeWire/PulseAudio должен быть запущен в твоей сессии")
+        say("   [!!] pactl cannot connect to the sound server")
+        say("        PipeWire/PulseAudio must be running in your session")
         ok = False
     return ok
 
 
 def pick_source() -> str | None:
-    """Выбор микрофона.
+    """Select a microphone.
 
-    Если источник по умолчанию существует — берём его молча: в подавляющем
-    большинстве случаев нужен именно он, и лишний вопрос только мешает. Список
-    показываем лишь когда источника по умолчанию нет или пользователь явно
-    попросил выбрать (аргумент --pick).
+    If a default source exists, use it silently: in the vast majority of cases
+    that is the one needed, and an extra question just gets in the way. Show the
+    list only when there is no default source or the user explicitly requested
+    a selection (the --pick argument).
     """
     say()
-    say("== Микрофон")
+    say("== Microphone")
 
     current = default_source()
     if current and not PICK_SOURCE:
-        say(f"   Взят источник по умолчанию: {current}")
-        say("   (выбрать другой: fifine-setup.py --pick)")
+        say(f"   Using default source: {current}")
+        say("   (to choose another: fifine-setup.py --pick)")
         return current
 
     r = subprocess.run(["pactl", "list", "sources", "short"],
                        capture_output=True, text=True)
     if r.returncode != 0 or not r.stdout.strip():
-        say("   Не удалось получить список источников.")
+        say("   Could not get the list of sources.")
         if current:
-            say(f"   Беру источник по умолчанию: {current}")
+            say(f"   Using default source: {current}")
             return current
         return None
 
@@ -112,21 +112,21 @@ def pick_source() -> str | None:
             sources.append(parts[1])
 
     if not sources:
-        say("   Источников не найдено.")
+        say("   No sources found.")
         return current
 
-    say("   Доступные источники:")
+    say("   Available sources:")
     for i, name in enumerate(sources, 1):
-        mark = "  <- по умолчанию" if name == current else ""
+        mark = "  <- default" if name == current else ""
         say(f"     {i}) {name}{mark}")
 
-    answer = input(f"\n   Номер микрофона (Enter = {current or 'первый'}): ").strip()
+    answer = input(f"\n   Microphone number (Enter = {current or 'first'}): ").strip()
     if not answer:
         return current or sources[0]
     try:
         return sources[int(answer) - 1]
     except (ValueError, IndexError):
-        say("   Не понял номер, беру первый.")
+        say("   Invalid number; using the first source.")
         return current or sources[0]
 
 
@@ -136,14 +136,14 @@ def default_source() -> str | None:
 
 
 def capture_one_press(prompt: str, seconds: int = 25) -> tuple[str, str, int] | None:
-    """Ловит первое нажатие любой кнопки/клавиши на любом устройстве.
+    """Capture the first press of any button/key on any device.
 
-    Возвращает (имя устройства, имя event-узла, код). Слушает ВСЕ устройства
-    сразу — заранее неизвестно, какое из них пришлёт событие.
+    Returns (device name, event node name, code). Listens to ALL devices
+    at once — we do not know in advance which one will send the event.
     """
     nodes = list_event_nodes()
     if not nodes:
-        say("   Не найдено ни одного /dev/input/event*.")
+        say("   No /dev/input/event* devices found.")
         return None
 
     fds: dict[int, str] = {}
@@ -153,11 +153,11 @@ def capture_one_press(prompt: str, seconds: int = 25) -> tuple[str, str, int] | 
         except OSError:
             continue
     if not fds:
-        say("   Нет доступа к /dev/input (нужна группа input).")
+        say("   No access to /dev/input (the input group is required).")
         return None
 
     say(f"   {prompt}")
-    say(f"   Слушаю {len(fds)} устройств, у тебя {seconds} секунд...")
+    say(f"   Listening to {len(fds)} devices; you have {seconds} seconds...")
 
     deadline = time.time() + seconds
     try:
@@ -173,7 +173,7 @@ def capture_one_press(prompt: str, seconds: int = 25) -> tuple[str, str, int] | 
                     if len(chunk) < EV_SIZE:
                         break
                     _, _, etype, code, value = struct.unpack("llHHi", chunk)
-                    # Реагируем только на НАЖАТИЕ кнопки/клавиши.
+                    # React only to a button/key PRESS.
                     if etype == EV_KEY and value == 1 and code != 0:
                         node = fds[fd]
                         return dev_name(node), node, code
@@ -187,145 +187,145 @@ def main() -> int:
     global PICK_SOURCE
 
     parser = argparse.ArgumentParser(
-        description="Автопоиск железа и создание конфига для fifine-ptt")
+        description="Automatically detect hardware and create a config for fifine-ptt")
     parser.add_argument("--pick", action="store_true",
-                        help="спрашивать микрофон, даже если есть источник по умолчанию")
+                        help="ask for a microphone even if a default source exists")
     parser.add_argument("--config-only", action="store_true",
-                        help="не трогать устройства, только показать текущий конфиг")
+                        help="do not touch devices; only show the current config")
     args = parser.parse_args()
     PICK_SOURCE = args.pick
 
-    say("=== Настройка fifine-mouse-ptt ===")
+    say("=== fifine-mouse-ptt setup ===")
     say()
 
     if args.config_only:
         if os.path.exists(CONFIG_FILE):
-            say(f"Текущий конфиг: {CONFIG_FILE}")
+            say(f"Current config: {CONFIG_FILE}")
             say()
             with open(CONFIG_FILE) as fh:
                 say(fh.read().rstrip())
         else:
-            say(f"Конфига нет: {CONFIG_FILE}")
-            say("Запусти без --config-only, чтобы создать.")
+            say(f"Config does not exist: {CONFIG_FILE}")
+            say("Run without --config-only to create it.")
         return 0
 
     if not check_prerequisites():
         say()
-        say("Сначала устрани замечания выше, потом запусти скрипт снова.")
+        say("Fix the issues above first, then run the script again.")
         return 1
 
     src = pick_source()
     if not src:
-        say("Без источника настройка невозможна.")
+        say("Setup is not possible without a source.")
         return 1
 
     say()
-    say("== Кнопка мыши для push-to-talk / push-to-mute")
-    say("   Сейчас попрошу нажать боковую кнопку мыши.")
-    got = capture_one_press("НАЖМИ БОКОВУЮ КНОПКУ МЫШИ (ту, что у большого пальца).", 25)
+    say("== Mouse button for push-to-talk / push-to-mute")
+    say("   I will now ask you to press a side button on the mouse.")
+    got = capture_one_press("PRESS A SIDE MOUSE BUTTON (the one by your thumb).", 25)
     if not got:
-        say("   Не поймал нажатие. Попробуй ещё раз или задай вручную:")
-        say("     FIFINE_DEVICE_MATCH='<имя>' FIFINE_BTN=<код>")
+        say("   Did not capture a press. Try again or set it manually:")
+        say("     FIFINE_DEVICE_MATCH='<name>' FIFINE_BTN=<code>")
         return 1
     mouse_name, mouse_node, mouse_code = got
-    say(f"   Поймано: устройство '{mouse_name}', код {mouse_code}")
+    say(f"   Captured: device '{mouse_name}', code {mouse_code}")
 
-    # Короткое имя для маски: убираем типовые хвосты, чтобы совпадало
-    # и при переподключении устройства.
+    # Short name for the match mask: remove common suffixes so it also matches
+    # when the device is reconnected.
     mask = mouse_name
     for tail in (" System Control", " Consumer Control", " Keyboard", " Mouse"):
         if mask.endswith(tail):
             mask = mask[: -len(tail)]
 
     say()
-    say("== Сенсорная кнопка микрофона (необязательно)")
-    say("   Если у микрофона есть своя кнопка мьюта, её можно синхронизировать.")
-    answer = input("   Настроить? [y/N]: ").strip().lower()
+    say("== Microphone touch button (optional)")
+    say("   If your microphone has its own mute button, it can be synchronized.")
+    answer = input("   Configure it? [y/N]: ").strip().lower()
     touch_enabled = False
     touch_mask, touch_code = "", ""
     if answer.startswith("y"):
-        got2 = capture_one_press("НАЖМИ КНОПКУ НА КОРПУСЕ МИКРОФОНА.", 25)
+        got2 = capture_one_press("PRESS THE BUTTON ON THE MICROPHONE BODY.", 25)
         if got2:
             tname, _, tcode = got2
-            say(f"   Поймано: устройство '{tname}', код {tcode}")
+            say(f"   Captured: device '{tname}', code {tcode}")
             touch_mask, touch_code, touch_enabled = tname, str(tcode), True
         else:
-            say("   Не поймал — синхронизацию пропускаю.")
+            say("   No press captured — skipping synchronization.")
 
-    # ---------------------------------------------------------------- запись
-    # Каждой строке — комментарий: файл открывают руками, когда что-то не
-    # работает, и в этот момент понимать смысл полей важнее краткости.
+    # ---------------------------------------------------------------- writing
+    # Each line gets a comment: people open the file manually when something
+    # is not working, and understanding the fields matters more than brevity then.
     os.makedirs(CONFIG_DIR, exist_ok=True)
     lines = [
-        "# Конфиг fifine-ptt. Создан fifine-setup.py.",
+        "# fifine-ptt config. Created by fifine-setup.py.",
         "#",
-        "# Демон читает этот файл при запуске. Переменные, заданные в окружении,",
-        "# имеют приоритет: можно разово переопределить, не редактируя файл, —",
+        "# The daemon reads this file at startup. Environment variables take",
+        "# precedence: override them for a single run without editing the file, e.g.:",
         "#     FIFINE_DEVICE_MATCH='Logitech' fifine-ptt --status",
         "#",
-        "# Формат: KEY=значение. Символ # начинает комментарий.",
+        "# Format: KEY=value. The # character starts a comment.",
         "",
-        "# Какой источник звука переключать. Посмотреть все:",
+        "# Which audio source to toggle. List all sources with:",
         "#     pactl list sources short",
         f"FIFINE_SOURCE={src}",
         "",
-        "# Мышь: подстрока имени устройства и код кнопки. Имя берётся как есть из",
-        "# /sys/class/input/eventN/device/name, номер event-узла НЕ подходит —",
-        "# номера меняются при переподключении, имена нет.",
-        "# Посмотреть устройства:  python3 mouse-hid-sniff.py 20",
+        "# Mouse: a substring of the device name and the button code. The name is taken",
+        "# as-is from /sys/class/input/eventN/device/name; the event node number is NOT",
+        "# suitable — numbers change on reconnect, names do not.",
+        "# List devices with:  python3 mouse-hid-sniff.py 20",
         f"FIFINE_DEVICE_MATCH={mask}",
-        f"# {mouse_code} = BTN_EXTRA (боковая кнопка). Другие: 272 левая, 273 правая,",
-        "# 274 колесо, 275 и 276 боковые.",
+        f"# {mouse_code} = BTN_EXTRA (side button). Other codes: 272 left, 273 right,",
+        "# 274 wheel, 275 and 276 side buttons.",
         f"FIFINE_BTN={mouse_code}",
     ]
     if touch_enabled:
         lines += [
             "",
-            "# Кнопка на корпусе микрофона. У устройства может быть ДВА независимых",
-            "# гейта мьюта: аппаратный (его показывает светодиод) и программный",
-            "# (Mic Capture Switch, который видят приложения). Светодиод слушает оба,",
-            "# система — только программный. FIFINE_TOUCH=1 заставляет демон слушать",
-            "# эту кнопку и приводить программный гейт в соответствие с ней.",
-            "# Подробности: docs/how-it-works.md",
+            "# Button on the microphone body. The device may have TWO independent",
+            "# mute gates: hardware (shown by the LED) and software",
+            "# (Mic Capture Switch, seen by applications). The LED listens to both,",
+            "# while the system listens only to software. FIFINE_TOUCH=1 makes the daemon",
+            "# listen to this button and align the software gate with it.",
+            "# Details: docs/how-it-works.md",
             "FIFINE_TOUCH=1",
             f"FIFINE_TOUCH_DEVICE_MATCH={touch_mask}",
-            f"# {touch_code} = BTN_0/KEY_BUTTONCONFIG у этого устройства.",
+            f"# {touch_code} = BTN_0/KEY_BUTTONCONFIG on this device.",
             f"FIFINE_TOUCH_BTN={touch_code}",
         ]
     else:
         lines += [
             "",
-            "# Синхронизация с кнопкой микрофона не настроена. Если у микрофона есть",
-            "# своя кнопка мьюта — раскомментируй и подставь значения:",
+            "# Synchronization with the microphone button is not configured. If your",
+            "# microphone has its own mute button, uncomment and fill in these values:",
             "# FIFINE_TOUCH=1",
-            "# FIFINE_TOUCH_DEVICE_MATCH=<подстрока имени микрофона>",
-            "# FIFINE_TOUCH_BTN=<код кнопки>",
+            "# FIFINE_TOUCH_DEVICE_MATCH=<microphone name substring>",
+            "# FIFINE_TOUCH_BTN=<button code>",
         ]
     lines += [
         "",
-        "# Всплывашка при переключении. Требует omarchy-osd (только Omarchy) —",
-        "# на других системах оставь закомментированным, иначе просто не сработает.",
+        "# Notification popup when toggling. Requires omarchy-osd (Omarchy only) —",
+        "# leave commented on other systems or it simply will not work.",
         "# FIFINE_OSD=1",
         "",
-        "# Отладка: писать каждый переход состояния в stderr.",
-        "# Удобно запускать так:  FIFINE_DEBUG=1 fifine-ptt",
+        "# Debugging: write every state transition to stderr.",
+        "# Useful to run like this:  FIFINE_DEBUG=1 fifine-ptt",
         "# FIFINE_DEBUG=1",
     ]
     with open(CONFIG_FILE, "w") as fh:
         fh.write("\n".join(lines) + "\n")
 
     say()
-    say(f"== Конфиг записан: {CONFIG_FILE}")
+    say(f"== Config written: {CONFIG_FILE}")
     for line in lines:
         say(f"   {line}")
 
     say()
-    say("== Готово. Проверка:")
+    say("== Done. Verify with:")
     say("   fifine-ptt --status")
     say("   fifine-ptt-selftest")
-    say("   watch -n0.3 mic-status      # и нажать кнопку")
+    say("   watch -n0.3 mic-status      # and press the button")
     say()
-    say("Демон подхватит этот конфиг автоматически при следующем запуске.")
+    say("The daemon will automatically load this config the next time it starts.")
     return 0
 
 
@@ -334,5 +334,5 @@ if __name__ == "__main__":
         sys.exit(main())
     except KeyboardInterrupt:
         say()
-        say("Прервано.")
+        say("Interrupted.")
         sys.exit(130)
